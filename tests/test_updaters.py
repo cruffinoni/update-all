@@ -84,3 +84,20 @@ def test_cargo_check_in_path():
     from update_all.updaters import _cargo_install_update_present
     with patch("update_all.updaters.shutil.which", return_value="/usr/local/bin/cargo-install-update"):
         assert _cargo_install_update_present() is True
+
+
+def test_apt_and_snap_need_sudo():
+    updaters = {u.label: u for u in all_updaters()}
+    assert updaters["APT"].needs_sudo is True
+    assert updaters["SNAP"].needs_sudo is True
+
+
+def test_non_sudo_updaters_do_not_need_sudo():
+    updaters = {u.label: u for u in all_updaters()}
+    for label in ("BREW", "NPM", "PIPX", "RUST", "FLATPAK"):
+        assert updaters[label].needs_sudo is False, f"{label} should not need sudo"
+
+
+def test_brew_is_only_sequential():
+    sequential = [u for u in all_updaters() if u.is_sequential]
+    assert [u.label for u in sequential] == ["BREW", "APT"]

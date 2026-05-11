@@ -1,6 +1,7 @@
 """Tests for the update_all.cli logs subcommand."""
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
@@ -18,9 +19,21 @@ def patch_log_path(monkeypatch, tmp_path):
     return log_path
 
 
-def test_logs_no_file():
-    result = runner.invoke(app, ["logs"])
+def test_logs_no_file_macos():
+    with patch("update_all.cli.sys") as mock_sys:
+        mock_sys.platform = "darwin"
+        result = runner.invoke(app, ["logs"])
     assert result.exit_code == 1
+    assert "LaunchAgent" in result.output
+    assert "--install-agent" in result.output
+
+
+def test_logs_no_file_linux():
+    with patch("update_all.cli.sys") as mock_sys:
+        mock_sys.platform = "linux"
+        result = runner.invoke(app, ["logs"])
+    assert result.exit_code == 1
+    assert "systemd timer" in result.output
     assert "--install-agent" in result.output
 
 

@@ -18,6 +18,7 @@ class Updater:
     commands: list[str]
     check: Callable[[], bool]
     is_sequential: bool = False
+    needs_sudo: bool = False
     description: str = ""
 
 
@@ -59,6 +60,7 @@ def all_updaters() -> list[Updater]:
             description="APT system packages",
             check=lambda: shutil.which("apt") is not None,
             is_sequential=True,
+            needs_sudo=True,
             commands=[
                 "sudo apt update",
                 "sudo apt full-upgrade -y",
@@ -70,6 +72,7 @@ def all_updaters() -> list[Updater]:
             label="SNAP",
             description="Snap packages",
             check=lambda: shutil.which("snap") is not None,
+            needs_sudo=True,
             commands=["sudo snap refresh"],
         ),
         Updater(

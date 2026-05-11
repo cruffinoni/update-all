@@ -96,3 +96,47 @@ def test_run_sequential_failure_propagates():
     assert len(results) == 1
     assert results[0].succeeded is False
     assert results[0].exit_code != 0
+
+
+def test_run_sequential_background_rewrites_sudo_for_needs_sudo_updater():
+    captured: list[str] = []
+
+    def fake_run(args, **_kwargs):
+        captured.append(args[2])
+        mock = MagicMock()
+        mock.returncode = 0
+        return mock
+
+    updater = Updater(
+        label="APT",
+        commands=["sudo apt update"],
+        check=lambda: True,
+        needs_sudo=True,
+        description="test",
+    )
+    with patch("update_all.runner.subprocess.run", side_effect=fake_run):
+        run_sequential([updater], _make_console(), background=True)
+
+    assert captured == ["sudo -n apt update"]
+
+
+def test_run_sequential_foreground_keeps_sudo_unchanged():
+    captured: list[str] = []
+
+    def fake_run(args, **_kwargs):
+        captured.append(args[2])
+        mock = MagicMock()
+        mock.returncode = 0
+        return mock
+
+    updater = Updater(
+        label="APT",
+        commands=["sudo apt update"],
+        check=lambda: True,
+        needs_sudo=True,
+        description="test",
+    )
+    with patch("update_all.runner.subprocess.run", side_effect=fake_run):
+        run_sequential([updater], _make_console(), background=False)
+
+    assert captured == ["sudo apt update"]

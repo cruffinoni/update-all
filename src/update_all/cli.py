@@ -130,7 +130,7 @@ def run(
         if sequential_updaters:
             if not background:
                 console.print("[bold][SEQ][/bold] Sequential phase...")
-            seq_results = run_sequential(sequential_updaters, console)
+            seq_results = run_sequential(sequential_updaters, console, background=background)
 
         par_results: list[JobResult] = []
         if parallel_updaters:
@@ -193,7 +193,10 @@ def logs(
     console = Console(no_color=no_colors)
     if not agent.LOG_PATH.exists():
         console.print(f"[yellow]No log file found.[/yellow] Expected: {agent.LOG_PATH}")
-        console.print("[dim]Install the LaunchAgent with --install-agent to enable background logging.[/dim]")
+        if sys.platform == "darwin":
+            console.print("[dim]Install the LaunchAgent with --install-agent to enable background logging.[/dim]")
+        else:
+            console.print("[dim]Install the systemd timer with --install-agent to enable background logging.[/dim]")
         raise typer.Exit(1)
     content = agent.LOG_PATH.read_text()
     if not content.strip():

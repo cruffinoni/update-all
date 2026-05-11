@@ -27,7 +27,12 @@ class JobResult:
     succeeded: bool
 
 
-def run_sequential(updaters: list[Updater], console: Console) -> list[JobResult]:
+def run_sequential(
+    updaters: list[Updater],
+    console: Console,
+    *,
+    background: bool = False,
+) -> list[JobResult]:
     """Run updaters sequentially, streaming output directly to the terminal."""
     results: list[JobResult] = []
 
@@ -42,6 +47,8 @@ def run_sequential(updaters: list[Updater], console: Console) -> list[JobResult]
         start = time.monotonic()
 
         for cmd in updater.commands:
+            if background and updater.needs_sudo:
+                cmd = cmd.replace("sudo ", "sudo -n ", 1)
             proc = subprocess.run(["bash", "-lc", cmd], capture_output=False, check=False)
             if exit_code == 0 and proc.returncode != 0:
                 exit_code = proc.returncode
