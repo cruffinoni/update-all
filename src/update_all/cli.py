@@ -4,29 +4,22 @@ from __future__ import annotations
 
 import datetime
 import os
+import re
 import shutil
 import subprocess
 import sys
 import time
 from typing import Annotated
 
+import rich.box
 import typer
 from rich.console import Console
+from rich.table import Table
 
 from update_all import agent, idempotency, notify
-from update_all.runner import JobResult, run_parallel, run_sequential
+from update_all.runner import JobResult, fmt_duration, run_parallel, run_sequential
 from update_all.sudo import SudoKeepalive
 from update_all.updaters import Updater, all_updaters
-
-def _fmt_duration(seconds: float) -> str:
-    s = int(seconds)
-    h, rem = divmod(s, 3600)
-    m, sec = divmod(rem, 60)
-    if h:
-        return f"{h} h {m} min" if m else f"{h} h"
-    if m:
-        return f"{m} min {sec} s" if sec else f"{m} min"
-    return f"{sec} s"
 
 
 app = typer.Typer(
@@ -84,13 +77,13 @@ def run(
             last_dt = datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
             next_dt = datetime.datetime.fromtimestamp(ts + idempotency.THRESHOLD_SECONDS).strftime("%Y-%m-%d %H:%M:%S")
             console.print(
-                f"[dim]Already ran in the last {_fmt_duration(idempotency.THRESHOLD_SECONDS)} — skipping.\n"
-                f"The last run was {_fmt_duration(age)} ago ({last_dt}).\n"
-                f"The next run will be in {_fmt_duration(remaining)} ({next_dt}).\n"
+                f"[dim]Already ran in the last {fmt_duration(idempotency.THRESHOLD_SECONDS)} — skipping.\n"
+                f"The last run was {fmt_duration(age)} ago ({last_dt}).\n"
+                f"The next run will be in {fmt_duration(remaining)} ({next_dt}).\n"
                 f"Use --force to override.[/dim]"
             )
         else:
-            console.print("[dim]Already ran in the last 12 h — skipping. Use --force to override.[/dim]")
+            console.print(f"[dim]Already ran in the last {fmt_duration(idempotency.THRESHOLD_SECONDS)} — skipping. Use --force to override.[/dim]")
         raise typer.Exit(0)
 
     if jobs <= 0:
@@ -109,10 +102,6 @@ def run(
     keepalive: SudoKeepalive | None = None
 
     try:
-        if do_os:
-            keepalive = SudoKeepalive()
-            keepalive.start()
-
         updaters = all_updaters()
 
         if only:
@@ -123,19 +112,25 @@ def run(
             skip_labels = {lbl.strip().upper() for lbl in skip.split(",")}
             updaters = [u for u in updaters if u.label not in skip_labels]
 
+        needs_sudo = do_os or (not background and any(u.needs_sudo for u in updaters if u.check()))
+        if needs_sudo:
+            console.print("[bold]⚠  sudo required — enter your password once:[/bold]")
+            keepalive = SudoKeepalive()
+            keepalive.start()
+
         sequential_updaters = [u for u in updaters if u.is_sequential]
         parallel_updaters   = [u for u in updaters if not u.is_sequential]
 
         seq_results: list[JobResult] = []
         if sequential_updaters:
             if not background:
-                console.print("[bold][SEQ][/bold] Sequential phase...")
+                console.print("[bold]Sequential phase[/bold]")
             seq_results = run_sequential(sequential_updaters, console, background=background)
 
         par_results: list[JobResult] = []
         if parallel_updaters:
             if not background:
-                console.print("[bold][PAR][/bold] Parallel phase...")
+                console.print("[bold]Parallel phase[/bold]")
             par_results = run_parallel(parallel_updaters, max_workers, console, background=background)
 
         os_results: list[JobResult] = []
@@ -155,13 +150,13 @@ def run(
                 is_sequential=True,
                 description=os_description,
             )
-            console.print(f"[bold][OS][/bold] Running {os_label} system updates...")
+            console.print(f"[bold]Running {os_label} system updates[/bold]")
             os_results = run_sequential([os_updater], console)
 
         try:
             idempotency.mark_ran_today()
         except OSError as exc:
-            console.print(f"[yellow][WARN][/yellow] Could not write idempotency sentinel: {exc}")
+            console.print(f"[yellow]⚠[/yellow] Could not write idempotency sentinel: {exc}")
 
         all_results = seq_results + par_results + os_results
         ok_count   = sum(1 for r in all_results if r.succeeded)
@@ -169,13 +164,12 @@ def run(
         elapsed    = time.monotonic() - start_ts
 
         if not background:
-            console.rule()
-            console.print(f"[bold]Done in {elapsed:.0f}s[/bold] — {ok_count} succeeded, {fail_count} failed")
+            _print_summary(all_results, elapsed, console)
             _print_versions(console)
 
         notify.send(
             "update-all",
-            f"{ok_count} succeeded, {fail_count} failed — done in {elapsed:.0f}s",
+            f"{ok_count} succeeded, {fail_count} failed — done in {fmt_duration(elapsed)}",
             success=(fail_count == 0),
         )
 
@@ -192,7 +186,7 @@ def logs(
     """Display the log from the latest background run."""
     console = Console(no_color=no_colors)
     if not agent.LOG_PATH.exists():
-        console.print(f"[yellow]No log file found.[/yellow] Expected: {agent.LOG_PATH}")
+        console.print(f"[yellow]⚠[/yellow] No log file found. Expected: {agent.LOG_PATH}")
         if sys.platform == "darwin":
             console.print("[dim]Install the LaunchAgent with --install-agent to enable background logging.[/dim]")
         else:
@@ -202,7 +196,75 @@ def logs(
     if not content.strip():
         console.print("[dim](log file is empty)[/dim]")
     else:
-        console.print(content, end="")
+        console.print(content, end="", highlight=False)
+
+
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+
+def _extract_notes(result: JobResult) -> str:
+    """Parse result.output for a human-readable one-line summary."""
+    if not result.output:
+        return "—"
+    out = result.output
+    label = result.label
+    if label == "BREW":
+        parts = []
+        m = re.search(r"Upgrading (\d+) (formulae?)", out)
+        if m:
+            parts.append(f"{m.group(1)} {m.group(2)}")
+        m = re.search(r"Upgrading (\d+) (casks?)", out)
+        if m:
+            parts.append(f"{m.group(1)} {m.group(2)}")
+        return ", ".join(parts) or "no upgrades"
+    if label == "APT":
+        m = re.search(r"(\d+) upgraded", out)
+        return f"{m.group(1)} upgraded" if m else "no upgrades"
+    if label == "NPM":
+        m = re.search(r"changed (\d+) packages?", out)
+        if m:
+            n = int(m.group(1))
+            return f"{_plural(n, 'package')} changed"
+        return "no changes"
+    if label == "PNPM":
+        m = re.search(r"(\d+) packages? updated", out)
+        if m:
+            n = int(m.group(1))
+            return f"{_plural(n, 'package')} updated"
+        return "no changes"
+    if label == "PIPX":
+        count = sum(1 for line in out.splitlines() if "upgraded" in line.lower())
+        return _plural(count, "package") + " upgraded" if count else "no upgrades"
+    if not result.succeeded:
+        for line in out.splitlines():
+            if "error:" in line.lower():
+                return line.strip()[:60]
+    lines = [line for line in out.splitlines() if line.strip()]
+    return f"{len(lines)} lines" if lines else "—"
+
+
+def _print_summary(results: list[JobResult], elapsed: float, console: Console) -> None:
+    """Print a table summarising all job results."""
+    table = Table(
+        show_header=True,
+        header_style="bold",
+        show_edge=True,
+        box=rich.box.SIMPLE_HEAD,
+    )
+    table.add_column("", justify="center", width=2, no_wrap=True)
+    table.add_column("Tool", style="bold", no_wrap=True)
+    table.add_column("Time", justify="right", no_wrap=True)
+    table.add_column("Notes")
+    for result in results:
+        icon = "[green]✓[/green]" if result.succeeded else "[red]✗[/red]"
+        table.add_row(icon, result.label, fmt_duration(result.duration), _extract_notes(result))
+    console.rule()
+    console.print(table)
+    ok = sum(1 for r in results if r.succeeded)
+    fail = sum(1 for r in results if not r.succeeded)
+    status = "[green]✓[/green]" if fail == 0 else "[red]✗[/red]"
+    console.print(f"{status}  {ok} succeeded  ·  {fail} failed  ·  {fmt_duration(elapsed)}")
 
 
 def _print_versions(console: Console) -> None:
@@ -227,6 +289,6 @@ def _print_versions(console: Console) -> None:
             result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=5)
             version_line = (result.stdout or result.stderr).splitlines()[0] if (result.stdout or result.stderr) else ""
             if version_line:
-                console.print(f"[cyan][VER][/cyan] {version_line}")
+                console.print(f"[dim]{name}[/dim]  {version_line}", highlight=False)
         except subprocess.TimeoutExpired:
-            console.print(f"[yellow][WARN][/yellow] {name} --version timed out")
+            console.print(f"[yellow]⚠[/yellow] {name} --version timed out")

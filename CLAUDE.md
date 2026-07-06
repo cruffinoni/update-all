@@ -4,44 +4,59 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
-```sh
-# Install in editable mode with dev dependencies
+```bash
+# Install locally (production)
+uv tool install . --force --python 3.11
+
+# Editable dev install
 pip install -e ".[dev]"
 
-# Run all tests
+# Run tests
 pytest
 
 # Run a single test file
-pytest tests/test_updaters.py
+pytest tests/test_runner.py
 
 # Run a single test
-pytest tests/test_updaters.py::test_brew_is_only_sequential
-
-# Run the CLI
-update-all --help
-update-all --only BREW,NPM
-update-all --skip OMZ --jobs 4
-update-all --force         # override daily idempotency guard
-update-all --background    # log-only mode, no OS updates
+pytest tests/test_runner.py::test_run_sequential_success
 ```
+
+No linter is configured in `pyproject.toml`.
 
 ## Architecture
 
-The project is a macOS package manager updater with a daily idempotency guard. It runs update commands across all installed tools on the machine.
+`update-all` is a Python CLI tool that updates all package managers on a macOS or Linux developer machine in one command. Entry point: `src/update_all/cli.py` (Typer).
 
-**Execution flow:**
-1. `cli.py` parses flags, builds the updater list from `updaters.py`, splits it into sequential vs parallel groups
-2. Sequential updaters run first via `runner.run_sequential()` (streams output live)
-3. Parallel updaters run concurrently via `runner.run_parallel()` (captures output, shows live spinner, prints at end)
-4. macOS `softwareupdate` runs last if `--os` was passed (requires sudo, uses `sudo.SudoKeepalive` to keep credentials valid)
-5. On success, `idempotency.mark_ran_today()` writes today's ISO date to `~/.cache/update-all/last-run`
+### Execution flow
 
-**Key types:**
-- `Updater` (`updaters.py`): dataclass holding a `label`, `commands` (shell strings), a `check` callable (returns bool — whether the tool is present), `is_sequential` flag, and `description`
-- `JobResult` (`runner.py`): dataclass with `label`, `exit_code`, `output`, `duration`, `succeeded`
+1. **Idempotency check** (`idempotency.py`) — skip if a run happened within the last 24 hours
+2. **`SudoKeepalive`** (`sudo.py`) — refreshes `sudo -v` every 60s in a daemon thread (only when `--os` flag is set)
+3. **Updater catalog** (`updaters.py`) — `all_updaters()` returns 16 `Updater` dataclasses; CLI filters by `--only`/`--skip`
+4. **Sequential runners** (`runner.py`) — `run_sequential()` streams output live; used for Homebrew, APT, and OS updates
+5. **Parallel runner** (`runner.py`) — `run_parallel()` runs the rest concurrently via `ThreadPoolExecutor`, shows a `rich.live.Live` progress panel
+6. **Notification** (`notify.py`) — `osascript` on macOS, `notify-send` on Linux
 
-**Updater catalog** (`updaters.py::all_updaters`): BREW (sequential), MAS, NPM, PNPM, YARN, PIPX, RUST, CARGO, ASDF, MISE, VSCODE, CLAUDE, OMZ. BREW is the only sequential updater; all others run in parallel.
+### Key design decisions
 
-**LaunchAgent** (`agent.py`): installs a plist under `~/Library/LaunchAgents/` that runs `update-all --background` every hour. The daily idempotency check ensures it only does real work once per day.
+- Each updater command runs through `bash -lc <cmd>` (login shell) to pick up the user's PATH
+- **Background mode** (`--background`): disables color, skips OS updates, rewrites `sudo <cmd>` → `sudo -n <cmd>` so unattended runs never hang
+- `Updater.is_sequential = True` forces a tool to run in the sequential pass (before the parallel pool)
+- `Updater.needs_sudo = True` participates in the `SudoKeepalive` keepalive
 
-All shell commands run under `bash -lc` to pick up the user's full login PATH.
+### Background scheduling (`agent.py`)
+
+- **macOS**: writes a `.plist` to `~/Library/LaunchAgents/` and bootstraps it via `launchctl`
+- **Linux**: writes a systemd `.service` + `.timer` to `~/.config/systemd/user/` and enables it with `systemctl --user`
+- Both use `update-all --background` and log to a platform-appropriate path
+
+### Module responsibilities
+
+| Module | Responsibility |
+|---|---|
+| `cli.py` | Typer CLI, flag parsing, `--install-agent`/`--uninstall-agent`, `logs` subcommand |
+| `updaters.py` | Catalog of all 16 `Updater` dataclasses |
+| `runner.py` | `run_sequential` and `run_parallel` execution engines |
+| `agent.py` | Background scheduler install/uninstall |
+| `idempotency.py` | 24-hour sentinel at `~/.cache/update-all/last-run` |
+| `notify.py` | Native OS notifications |
+| `sudo.py` | `SudoKeepalive` daemon thread |

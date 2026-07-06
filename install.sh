@@ -9,9 +9,9 @@ RED='\033[0;31m'
 RESET='\033[0m'
 
 info() { printf "${BOLD}%s${RESET}\n" "$*"; }
-ok()   { printf "${GREEN}[OK]${RESET} %s\n" "$*"; }
-warn() { printf "${YELLOW}[WARN]${RESET} %s\n" "$*"; }
-die()  { printf "${RED}[ERR]${RESET} %s\n" "$*" >&2; exit 1; }
+ok()   { printf "${GREEN}✓${RESET} %s\n" "$*"; }
+warn() { printf "${YELLOW}⚠${RESET} %s\n" "$*"; }
+die()  { printf "${RED}✗${RESET} %s\n" "$*" >&2; exit 1; }
 
 case "$(uname -s)" in
   Darwin) PLATFORM="macOS" ;;
@@ -33,7 +33,6 @@ else
 fi
 
 # --- Install update-all ---
-info "Installing update-all..."
 uv tool install "git+${REPO}" --force --python 3.11
 ok "update-all installed"
 
@@ -57,13 +56,15 @@ fi
 
 case "$INSTALL_AGENT" in
   [yY]|[yY][eE][sS])
-    update-all --install-agent
-    ok "Scheduler installed"
+    if update-all --install-agent; then
+      ok "Scheduler installed"
+    else
+      warn "Scheduler installation reported an error (see above)."
+    fi
     ;;
   *)
     info "Run 'update-all --install-agent' anytime to enable the scheduler."
     ;;
 esac
 
-printf "\n"
-ok "Done! Run 'update-all' to update all your package managers."
+printf "\nRun ${GREEN}update-all${RESET} to update all your package managers.\n"

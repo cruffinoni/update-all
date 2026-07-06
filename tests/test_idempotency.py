@@ -31,13 +31,13 @@ def test_already_ran_today_recent(patch_sentinel):
 
 
 def test_already_ran_today_stale(patch_sentinel):
-    patch_sentinel.write_text(str(BASE_TIME - 13 * 3600))
+    patch_sentinel.write_text(str(BASE_TIME - 25 * 3600))
     with freeze_time(BASE_TIME_STR):
         assert already_ran_today() is False
 
 
 def test_already_ran_today_boundary(patch_sentinel):
-    patch_sentinel.write_text(str(BASE_TIME - 12 * 3600))
+    patch_sentinel.write_text(str(BASE_TIME - 24 * 3600))
     with freeze_time(BASE_TIME_STR):
         assert already_ran_today() is False
 

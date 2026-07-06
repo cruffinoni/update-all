@@ -91,7 +91,7 @@ def all_updaters() -> list[Updater]:
             label="NPM",
             description="npm global packages",
             check=lambda: shutil.which("npm") is not None,
-            commands=["npm -g update"],
+            commands=["npm update -g"],
         ),
         Updater(
             label="PNPM",

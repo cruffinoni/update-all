@@ -65,15 +65,35 @@ def test_run_parallel_echo_succeeds():
     assert "world" in results[0].output
 
 
-def test_run_parallel_background_does_not_use_live():
+def test_run_parallel_background_does_not_use_progress_display():
     console = _make_console()
     updater = _echo_updater("BG", "echo bg")
-    with patch("update_all.runner.Live") as mock_live_cls:
-        mock_live_cls.return_value.__enter__ = MagicMock()
-        mock_live_cls.return_value.__exit__ = MagicMock(return_value=False)
+    with patch("update_all.runner.Progress") as mock_progress_cls:
+        mock_prog = MagicMock()
+        mock_prog.__enter__ = MagicMock(return_value=mock_prog)
+        mock_prog.__exit__ = MagicMock(return_value=False)
+        mock_prog.add_task = MagicMock(return_value=0)
+        mock_prog.update = MagicMock()
+        mock_progress_cls.return_value = mock_prog
         results = run_parallel([updater], max_workers=2, console=console, background=True)
-        mock_live_cls.return_value.__enter__.assert_not_called()
+        assert mock_progress_cls.call_args.kwargs.get("disable") is True
     assert len(results) == 1
+
+
+def test_execute_job_calls_on_line_callback():
+    from update_all.runner import _execute_job
+
+    lines_seen: list[str] = []
+    updater = Updater(
+        label="CB",
+        commands=["printf 'line1\\nline2\\n'"],
+        check=lambda: True,
+        description="",
+    )
+    result = _execute_job(updater, on_line=lines_seen.append)
+    assert result.succeeded
+    assert "line1" in lines_seen
+    assert "line2" in lines_seen
 
 
 def test_run_parallel_skips_when_check_false():

@@ -2,7 +2,7 @@
 
 On macOS installs a LaunchAgent that fires every hour (StartInterval=3600).
 On Linux installs a systemd user timer that fires every hour (OnUnitActiveSec=1h).
-The idempotency check in update_all ensures at most one run per 12-hour window.
+The idempotency check in update_all ensures at most one run per 24-hour window.
 """
 
 from __future__ import annotations
@@ -89,7 +89,7 @@ def _install_macos(console: Console) -> None:
     binary_path = shutil.which("update-all")
     if binary_path is None:
         binary_path = str(Path(sys.argv[0]).resolve())
-        console.print("[yellow]Warning: 'update-all' not found in PATH; falling back to current executable.[/yellow]")
+        console.print("[yellow]⚠[/yellow] 'update-all' not found in PATH; falling back to current executable.")
 
     plist: dict[str, Any] = {
         "Label": PLIST_LABEL,
@@ -115,39 +115,39 @@ def _install_macos(console: Console) -> None:
         subprocess.run(["launchctl", "bootout", domain, str(PLIST_PATH)], check=False)
         load_result = subprocess.run(["launchctl", "bootstrap", domain, str(PLIST_PATH)], check=False)
     if load_result.returncode != 0:
-        console.print(f"[red][ERR][/red] launchctl bootstrap failed (exit {load_result.returncode})")
+        console.print(f"[red]✗[/red] launchctl bootstrap failed (exit {load_result.returncode})")
         return
 
-    console.print(f"[green]LaunchAgent installed: {PLIST_PATH}[/green]")
+    console.print(f"[green]✓[/green] LaunchAgent installed: {PLIST_PATH}")
     console.print(
-        "[yellow]Warning: Check ~/Library/Logs/update-all.log after first automatic run "
-        "to verify PATH is correct for your setup.[/yellow]"
+        "[yellow]⚠[/yellow] Check ~/Library/Logs/update-all.log after first automatic run "
+        "to verify PATH is correct for your setup."
     )
 
 
 def _uninstall_macos(console: Console) -> None:
     if not PLIST_PATH.exists():
-        console.print("[yellow]Warning: LaunchAgent plist not found; nothing to uninstall.[/yellow]")
+        console.print("[yellow]⚠[/yellow] LaunchAgent plist not found; nothing to uninstall.")
         return
 
     domain = f"gui/{os.getuid()}"
     unload_result = subprocess.run(["launchctl", "bootout", domain, str(PLIST_PATH)], check=False)
     if unload_result.returncode != 0:
         console.print(
-            f"[yellow][WARN][/yellow] launchctl bootout failed (exit {unload_result.returncode}) — "
+            f"[yellow]⚠[/yellow] launchctl bootout failed (exit {unload_result.returncode}) — "
             "plist not deleted. The agent may still be loaded until next reboot."
         )
         return
     PLIST_PATH.unlink(missing_ok=True)
 
-    console.print(f"[green]LaunchAgent uninstalled: {PLIST_PATH}[/green]")
+    console.print(f"[green]✓[/green] LaunchAgent uninstalled: {PLIST_PATH}")
 
 
 def _install_linux(console: Console) -> None:
     binary_path = shutil.which("update-all")
     if binary_path is None:
         binary_path = str(Path(sys.argv[0]).resolve())
-        console.print("[yellow]Warning: 'update-all' not found in PATH; falling back to current executable.[/yellow]")
+        console.print("[yellow]⚠[/yellow] 'update-all' not found in PATH; falling back to current executable.")
 
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
@@ -183,30 +183,30 @@ def _install_linux(console: Console) -> None:
 
     reload_result = subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
     if reload_result.returncode != 0:
-        console.print(f"[red][ERR][/red] systemctl daemon-reload failed (exit {reload_result.returncode})")
+        console.print(f"[red]✗[/red] systemctl daemon-reload failed (exit {reload_result.returncode})")
         return
 
     enable_result = subprocess.run(["systemctl", "--user", "enable", "--now", TIMER_NAME], check=False)
     if enable_result.returncode != 0:
-        console.print(f"[red][ERR][/red] systemctl enable failed (exit {enable_result.returncode})")
+        console.print(f"[red]✗[/red] systemctl enable failed (exit {enable_result.returncode})")
         return
 
-    console.print(f"[green]systemd timer installed: {TIMER_PATH}[/green]")
+    console.print(f"[green]✓[/green] systemd timer installed: {TIMER_PATH}")
     console.print(
-        f"[yellow]Warning: Check {LOG_PATH} after first automatic run "
-        "to verify PATH is correct for your setup.[/yellow]"
+        f"[yellow]⚠[/yellow] Check {LOG_PATH} after first automatic run "
+        "to verify PATH is correct for your setup."
     )
 
 
 def _uninstall_linux(console: Console) -> None:
     if not TIMER_PATH.exists() and not SERVICE_PATH.exists():
-        console.print("[yellow]Warning: systemd unit files not found; nothing to uninstall.[/yellow]")
+        console.print("[yellow]⚠[/yellow] systemd unit files not found; nothing to uninstall.")
         return
 
     stop_result = subprocess.run(["systemctl", "--user", "disable", "--now", TIMER_NAME], check=False)
     if stop_result.returncode != 0:
         console.print(
-            f"[yellow][WARN][/yellow] systemctl disable failed (exit {stop_result.returncode}) — "
+            f"[yellow]⚠[/yellow] systemctl disable failed (exit {stop_result.returncode}) — "
             "unit files not deleted."
         )
         return
@@ -216,4 +216,4 @@ def _uninstall_linux(console: Console) -> None:
 
     subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
 
-    console.print(f"[green]systemd timer uninstalled: {TIMER_PATH}[/green]")
+    console.print(f"[green]✓[/green] systemd timer uninstalled: {TIMER_PATH}")
