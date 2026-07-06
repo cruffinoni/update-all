@@ -110,6 +110,10 @@ def _install_macos(console: Console) -> None:
 
     domain = f"gui/{os.getuid()}"
     load_result = subprocess.run(["launchctl", "bootstrap", domain, str(PLIST_PATH)], check=False)
+    if load_result.returncode == 5:
+        # EALREADY — service is already loaded; plist was updated in place, re-enable it
+        subprocess.run(["launchctl", "bootout", domain, str(PLIST_PATH)], check=False)
+        load_result = subprocess.run(["launchctl", "bootstrap", domain, str(PLIST_PATH)], check=False)
     if load_result.returncode != 0:
         console.print(f"[red][ERR][/red] launchctl bootstrap failed (exit {load_result.returncode})")
         return
