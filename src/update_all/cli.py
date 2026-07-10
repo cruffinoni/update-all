@@ -14,12 +14,14 @@ from typing import Annotated
 import rich.box
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from update_all import agent, idempotency, notify
-from update_all.runner import JobResult, fmt_duration, run_parallel, run_sequential
+from update_all.password import PasswordBroker
+from update_all.runner import JobDashboard, JobResult, fmt_duration, run_parallel, run_sequential
 from update_all.sudo import SudoKeepalive
-from update_all.updaters import Updater, all_updaters
+from update_all.updaters import all_updaters
 
 
 app = typer.Typer(
@@ -95,8 +97,9 @@ def run(
         do_os = False
 
     if not background:
-        console.rule("[bold]update-all[/bold]")
-        console.print(f"jobs={max_workers}  os_updates={do_os}  background={background}")
+        os_flag = "  ·  os on" if do_os else ""
+        console.print(f"[bold]update-all[/bold]  [dim]·  {max_workers} workers{os_flag}[/dim]")
+        console.print()
 
     start_ts = time.monotonic()
     keepalive: SudoKeepalive | None = None
@@ -121,44 +124,45 @@ def run(
         sequential_updaters = [u for u in updaters if u.is_sequential]
         parallel_updaters   = [u for u in updaters if not u.is_sequential]
 
+        dashboard = JobDashboard(console, disabled=background)
+        broker = PasswordBroker(pause=dashboard.pause)
+
         seq_results: list[JobResult] = []
-        if sequential_updaters:
-            if not background:
-                console.print("[bold]Sequential phase[/bold]")
-            seq_results = run_sequential(sequential_updaters, console, background=background)
-
         par_results: list[JobResult] = []
-        if parallel_updaters:
-            if not background:
-                console.print("[bold]Parallel phase[/bold]")
-            par_results = run_parallel(parallel_updaters, max_workers, console, background=background)
-
         os_results: list[JobResult] = []
+
+        with dashboard:
+            if sequential_updaters:
+                seq_results = run_sequential(sequential_updaters, console, dashboard, background=background, broker=broker)
+
+            if parallel_updaters:
+                par_results = run_parallel(parallel_updaters, max_workers, console, dashboard, background=background, broker=broker)
+
         if do_os:
             if sys.platform == "darwin":
                 os_commands = ["sudo softwareupdate -l", "sudo softwareupdate -ia --verbose"]
-                os_description = "macOS system updates"
-                os_label = "macOS"
             else:
                 os_commands = ["sudo apt full-upgrade -y", "sudo apt autoremove -y"]
-                os_description = "Ubuntu/Debian system updates"
-                os_label = "Linux"
-            os_updater = Updater(
-                label="OS",
-                commands=os_commands,
-                check=lambda: True,
-                is_sequential=True,
-                description=os_description,
-            )
-            console.print(f"[bold]Running {os_label} system updates[/bold]")
-            os_results = run_sequential([os_updater], console)
+            console.print()
+            console.print("[bold] OS [/bold]  [dim]system updates[/dim]")
+            os_exit = 0
+            os_start = time.monotonic()
+            for cmd in os_commands:
+                proc = subprocess.run(["bash", "-lc", cmd], capture_output=False, check=False)
+                if os_exit == 0 and proc.returncode != 0:
+                    os_exit = proc.returncode
+            os_duration = time.monotonic() - os_start
+            icon = "[green]✓[/green]" if os_exit == 0 else "[red]✗[/red]"
+            console.print(f"{icon} OS  {fmt_duration(os_duration)}")
+            os_results = [JobResult(label="OS", exit_code=os_exit, output="", duration=os_duration, succeeded=os_exit == 0, error_lines=0)]
+
+        all_results = seq_results + par_results + os_results
+        _print_failures(all_results, console)
 
         try:
             idempotency.mark_ran_today()
         except OSError as exc:
             console.print(f"[yellow]⚠[/yellow] Could not write idempotency sentinel: {exc}")
-
-        all_results = seq_results + par_results + os_results
         ok_count   = sum(1 for r in all_results if r.succeeded)
         fail_count = sum(1 for r in all_results if not r.succeeded)
         elapsed    = time.monotonic() - start_ts
@@ -244,6 +248,19 @@ def _extract_notes(result: JobResult) -> str:
     return f"{len(lines)} lines" if lines else "—"
 
 
+def _print_failures(results: list[JobResult], console: Console) -> None:
+    failed = [r for r in results if not r.succeeded]
+    if not failed:
+        return
+    console.print()
+    for result in failed:
+        console.print(f"[red]✗[/red] [bold]{result.label}[/bold] — exit {result.exit_code}")
+        if result.output:
+            tail = result.output.splitlines()[-result.error_lines:]
+            for line in tail:
+                console.print(f"  [dim]{escape(line)}[/dim]", highlight=False)
+
+
 def _print_summary(results: list[JobResult], elapsed: float, console: Console) -> None:
     """Print a table summarising all job results."""
     table = Table(
@@ -259,7 +276,7 @@ def _print_summary(results: list[JobResult], elapsed: float, console: Console) -
     for result in results:
         icon = "[green]✓[/green]" if result.succeeded else "[red]✗[/red]"
         table.add_row(icon, result.label, fmt_duration(result.duration), _extract_notes(result))
-    console.rule()
+    console.print()
     console.print(table)
     ok = sum(1 for r in results if r.succeeded)
     fail = sum(1 for r in results if not r.succeeded)
@@ -281,7 +298,8 @@ def _print_versions(console: Console) -> None:
         ("code",    ["code", "--version"]),
         ("claude",  ["claude", "--version"]),
     ]
-    console.rule("[dim]Versions[/dim]")
+    console.print()
+    console.print("[dim]Versions[/dim]")
     for name, cmd in tools:
         if shutil.which(name) is None:
             continue

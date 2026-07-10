@@ -3,16 +3,36 @@
 from __future__ import annotations
 
 import concurrent.futures
+import os
+import pty
+import re
+import select
 import subprocess
-import threading
 import time
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections import deque
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 
-from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TaskID, TextColumn, TimeElapsedColumn
+from rich.console import Console, Group
+from rich.live import Live
+from rich.spinner import Spinner
+from rich.text import Text
 
+from update_all.password import PasswordBroker
 from update_all.updaters import Updater
+
+_WINDOW = 5
+
+# ANSI SGR/cursor escapes, stripped before matching password prompts.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+# A sudo password prompt at the end of the current output tail.
+_PASSWORD_RE = re.compile(
+    r"(?:^|\n)[ \t]*(?:password:|\[sudo\] password for .+?:)[ \t]*\Z",
+    re.IGNORECASE,
+)
+# Emitted by sudo after a rejected attempt → re-prompt with a fresh password.
+_PW_FAIL_RE = re.compile(r"sorry, try again\.|authentication failure", re.IGNORECASE)
 
 
 def fmt_duration(seconds: float) -> str:
@@ -36,44 +56,166 @@ class JobResult:
     duration: float
     succeeded: bool
     description: str = ""
+    error_lines: int = 20
+
+
+def _completion_note(result: JobResult) -> str:
+    """One-line summary shown in the progress row after completion."""
+    from update_all.cli import _extract_notes  # lazy to avoid circular import at module load
+    try:
+        return _extract_notes(result)
+    except Exception:
+        pass
+    if not result.succeeded:
+        for line in result.output.splitlines():
+            line = line.strip()
+            if line and ("error" in line.lower() or "fatal" in line.lower() or "failed" in line.lower()):
+                return line[:80]
+    lines = [l for l in result.output.splitlines() if l.strip()]
+    return lines[-1][:80] if lines else "—"
+
+
+@dataclass
+class JobView:
+    """Live view state for a single updater in the dashboard."""
+
+    label: str
+    state: str = "pending"  # pending | running | done | fail
+    start: float = 0.0
+    duration: float = 0.0
+    lines: deque = field(default_factory=lambda: deque(maxlen=_WINDOW))
+    note: str = ""
+
+
+class JobDashboard:
+    """Live multi-line dashboard: a header per job plus a rolling 5-line log while running."""
+
+    def __init__(self, console: Console, *, disabled: bool = False) -> None:
+        self._console = console
+        self._disabled = disabled
+        self._views: dict[str, JobView] = {}
+        self._spinner = Spinner("dots")
+        self._live = Live(
+            self,
+            console=console,
+            refresh_per_second=12,
+            transient=False,
+            vertical_overflow="crop",
+        )
+
+    def register(self, label: str) -> None:
+        self._views[label] = JobView(label=label)
+
+    def start(self, label: str) -> None:
+        view = self._views.get(label) or JobView(label=label)
+        view.state = "running"
+        view.start = time.monotonic()
+        self._views[label] = view
+
+    def line(self, label: str, text: str) -> None:
+        view = self._views.get(label)
+        if view is not None:
+            view.lines.append(text[:80])
+
+    def complete(self, label: str, result: JobResult) -> None:
+        view = self._views.get(label) or JobView(label=label)
+        view.state = "done" if result.succeeded else "fail"
+        view.duration = result.duration
+        view.note = _completion_note(result)
+        self._views[label] = view
+
+    def __enter__(self) -> "JobDashboard":
+        if not self._disabled:
+            self._live.start()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        if not self._disabled:
+            self._live.stop()
+
+    @contextmanager
+    def pause(self) -> Iterator[None]:
+        """Temporarily stop the live display so another consumer can own the terminal."""
+        if self._disabled:
+            yield
+            return
+        self._live.stop()
+        try:
+            yield
+        finally:
+            self._live.start()
+
+    def __rich__(self) -> Group:
+        now = time.monotonic()
+        rows: list[Text] = []
+        for view in self._views.values():
+            if view.state == "pending":
+                rows.append(Text(f"  {view.label}", style="dim"))
+            elif view.state == "running":
+                rows.append(
+                    Text.assemble(
+                        self._spinner.render(now),
+                        f" {view.label:<8} ",
+                        (fmt_duration(now - view.start), "dim"),
+                    )
+                )
+                lines = list(view.lines)
+                lines += [""] * (_WINDOW - len(lines))
+                for entry in lines:
+                    rows.append(Text(f"    {entry}", style="dim"))
+            else:
+                icon = "[green]✓[/green]" if view.state == "done" else "[red]✗[/red]"
+                rows.append(
+                    Text.from_markup(
+                        f"{icon} {view.label:<8} [dim]{fmt_duration(view.duration)}  {view.note}[/dim]"
+                    )
+                )
+        return Group(*rows)
 
 
 def run_sequential(
     updaters: list[Updater],
     console: Console,
+    dashboard: JobDashboard,
     *,
     background: bool = False,
+    broker: PasswordBroker | None = None,
 ) -> list[JobResult]:
     """Run updaters sequentially, streaming output directly to the terminal."""
     results: list[JobResult] = []
 
     for updater in updaters:
         if not updater.check():
-            console.print(f"[yellow]⚠[/yellow] {updater.description or updater.label} not found — skipping")
             continue
 
-        console.rule(f"[bold]{updater.label}[/bold] {updater.description}")
-
-        exit_code = 0
-        start = time.monotonic()
-
-        for cmd in updater.commands:
-            if background and updater.needs_sudo:
-                cmd = cmd.replace("sudo ", "sudo -n ", 1)
-            proc = subprocess.run(["bash", "-lc", cmd], capture_output=False, check=False)
-            if exit_code == 0 and proc.returncode != 0:
-                exit_code = proc.returncode
-
-        duration = time.monotonic() - start
-        results.append(
-            JobResult(
-                label=updater.label,
-                exit_code=exit_code,
-                output="",
-                duration=duration,
-                succeeded=exit_code == 0,
+        if background:
+            exit_code = 0
+            start = time.monotonic()
+            for cmd in updater.commands:
+                if updater.needs_sudo:
+                    cmd = cmd.replace("sudo ", "sudo -n ", 1)
+                proc = subprocess.run(["bash", "-lc", cmd], capture_output=False, check=False)
+                if exit_code == 0 and proc.returncode != 0:
+                    exit_code = proc.returncode
+            duration = time.monotonic() - start
+            results.append(
+                JobResult(
+                    label=updater.label,
+                    exit_code=exit_code,
+                    output="",
+                    duration=duration,
+                    succeeded=exit_code == 0,
+                    error_lines=0,
+                )
             )
-        )
+            continue
+
+        label = updater.label
+        dashboard.register(label)
+        dashboard.start(label)
+        result = _execute_job(updater, on_line=lambda l, lbl=label: dashboard.line(lbl, l), broker=broker)
+        dashboard.complete(label, result)
+        results.append(result)
 
     return results
 
@@ -81,8 +223,12 @@ def run_sequential(
 def _execute_job(
     updater: Updater,
     on_line: Callable[[str], None] = lambda _: None,
+    broker: PasswordBroker | None = None,
 ) -> JobResult:
     """Execute all commands for a single updater, streaming output line-by-line."""
+    if updater.responder is not None or updater.needs_sudo:
+        return _execute_job_pty(updater, on_line, broker)
+
     output_parts: list[str] = []
     exit_code = 0
     start = time.monotonic()
@@ -111,6 +257,108 @@ def _execute_job(
         duration=duration,
         succeeded=exit_code == 0,
         description=updater.description,
+        error_lines=updater.error_lines,
+    )
+
+
+def _execute_job_pty(
+    updater: Updater,
+    on_line: Callable[[str], None] = lambda _: None,
+    broker: PasswordBroker | None = None,
+) -> JobResult:
+    """Execute an updater under a pty, auto-answering interactive prompts.
+
+    The command runs against a pseudo-terminal so it prompts as usual. A
+    ``[y/N]`` question is auto-confirmed by the updater's responder; a sudo
+    ``Password:`` prompt is handed to ``broker`` so the user can type it
+    (serialized across parallel jobs). Both un-terminated prompts and
+    newline-terminated prompts that then block on a read are handled.
+    """
+    output_parts: list[str] = []
+    exit_code = 0
+    start = time.monotonic()
+
+    for cmd in updater.commands:
+        master, slave = pty.openpty()
+        proc = subprocess.Popen(
+            ["bash", "-lc", cmd],
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            close_fds=True,
+        )
+        os.close(slave)
+
+        pending = ""  # text since the last newline — the prompt candidate
+        last_line = ""  # last non-empty flushed line, for newline-terminated prompts
+        answered = False  # guard so a single prompt is answered once
+
+        def _answer(candidate: str) -> bool:
+            nonlocal answered
+            if answered or not candidate.strip():
+                return False
+            if broker is not None and _PASSWORD_RE.search(_ANSI_RE.sub("", candidate)):
+                reprompt = bool(_PW_FAIL_RE.search("\n".join(output_parts[-3:])))
+                context = [ln for ln in output_parts[-2:] if ln.strip()]
+                os.write(master, broker.get_password(context, reprompt=reprompt))
+                answered = True
+                return True
+            if updater.responder is None:
+                return False
+            response = updater.responder.response_for(candidate)
+            if response is None:
+                return False
+            os.write(master, response)
+            answered = True
+            return True
+
+        try:
+            while True:
+                ready, _, _ = select.select([master], [], [], 0.1)
+                if ready:
+                    try:
+                        chunk = os.read(master, 4096)
+                    except OSError:
+                        break  # pty slave closed → process finished
+                    if not chunk:
+                        break
+                    answered = False  # new output → a fresh prompt may follow
+                    pending += chunk.decode("utf-8", "replace")
+                    while "\n" in pending:
+                        line, pending = pending.split("\n", 1)
+                        line = line.rstrip("\r")
+                        output_parts.append(line)
+                        on_line(line)
+                        if line.strip():
+                            last_line = line
+                    # Prompt left on an un-terminated line (no newline yet).
+                    if pending:
+                        _answer(pending)
+                elif proc.poll() is not None:
+                    break
+                else:
+                    # Process is alive but idle — likely blocked on a read after
+                    # printing a newline-terminated prompt. Answer the last line.
+                    _answer(pending or last_line)
+        finally:
+            os.close(master)
+
+        if pending:
+            output_parts.append(pending.rstrip("\r"))
+            on_line(pending.rstrip("\r"))
+        proc.wait()
+        if exit_code == 0 and proc.returncode != 0:
+            exit_code = proc.returncode
+
+    duration = time.monotonic() - start
+    return JobResult(
+        label=updater.label,
+        exit_code=exit_code,
+        output="\n".join(output_parts),
+        duration=duration,
+        succeeded=exit_code == 0,
+        description=updater.description,
+        error_lines=updater.error_lines,
     )
 
 
@@ -118,8 +366,10 @@ def run_parallel(
     updaters: list[Updater],
     max_workers: int,
     console: Console,
+    dashboard: JobDashboard,
     *,
     background: bool = False,
+    broker: PasswordBroker | None = None,
 ) -> list[JobResult]:
     """Run updaters in parallel, showing per-job live progress rows."""
     active_updaters: list[Updater] = []
@@ -127,64 +377,32 @@ def run_parallel(
     for updater in updaters:
         if updater.check():
             active_updaters.append(updater)
-        else:
-            console.print(f"[yellow]⚠[/yellow] {updater.description or updater.label} not found — skipping")
 
     if not active_updaters:
         return []
 
     results: list[JobResult] = []
 
-    progress = Progress(
-        SpinnerColumn(finished_text=" "),
-        TextColumn("[bold]{task.description:<10}[/bold]"),
-        TimeElapsedColumn(),
-        TextColumn("[dim]{task.fields[last_line]}[/dim]"),
-        console=console,
-        transient=False,
-        disable=background,
-    )
+    for updater in active_updaters:
+        dashboard.register(updater.label)
 
-    task_ids: dict[str, TaskID] = {}
+    def _make_job_runner(updater: Updater) -> Callable[[], JobResult]:
+        label = updater.label
 
-    with progress:
-        for updater in active_updaters:
-            tid = progress.add_task(updater.label, total=1, last_line="")
-            task_ids[updater.label] = tid
+        def _run() -> JobResult:
+            dashboard.start(label)
+            result = _execute_job(updater, on_line=lambda l: dashboard.line(label, l), broker=broker)
+            dashboard.complete(label, result)
+            return result
 
-        def _make_job_runner(updater: Updater) -> Callable[[], JobResult]:
-            def _on_line(line: str) -> None:
-                progress.update(task_ids[updater.label], last_line=line[:70])
+        return _run
 
-            def _run() -> JobResult:
-                result = _execute_job(updater, on_line=_on_line)
-                icon = "[green]✓[/green]" if result.succeeded else "[red]✗[/red]"
-                progress.update(
-                    task_ids[updater.label],
-                    advance=1,
-                    description=f"{icon} {updater.label}",
-                )
-                return result
-
-            return _run
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(_make_job_runner(u)): u for u in active_updaters}
-            for future in concurrent.futures.as_completed(futures):
-                results.append(future.result())
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_make_job_runner(u)): u for u in active_updaters}
+        for future in concurrent.futures.as_completed(futures):
+            results.append(future.result())
 
     order = {u.label: i for i, u in enumerate(active_updaters)}
     results.sort(key=lambda r: order[r.label])
-
-    for result in results:
-        console.rule(f"[bold]{result.label}[/bold] {result.description}")
-        if result.output.strip():
-            console.print(result.output.rstrip(), highlight=False)
-        else:
-            console.print("[dim](no output)[/dim]")
-        if result.succeeded:
-            console.print(f"[green]✓[/green] {result.label} done ({fmt_duration(result.duration)})")
-        else:
-            console.print(f"[red]✗[/red] {result.label} failed (exit {result.exit_code})")
 
     return results

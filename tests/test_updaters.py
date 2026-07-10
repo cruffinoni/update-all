@@ -57,19 +57,19 @@ def test_brew_commands_no_cask_on_linux():
 
 
 def test_yarn_check_no_yarn_in_path():
-    with patch("update_all.updaters.shutil.which", return_value=None):
+    with patch("update_all.updaters._tool_available", return_value=False):
         assert _yarn_v1_present() is False
 
 
 def test_yarn_check_yarn_v2():
-    with patch("update_all.updaters.shutil.which", return_value="/usr/local/bin/yarn"):
+    with patch("update_all.updaters._tool_available", return_value=True):
         mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="2.0.0", stderr="")
         with patch("update_all.updaters.subprocess.run", return_value=mock_result):
             assert _yarn_v1_present() is False
 
 
 def test_yarn_check_yarn_v1():
-    with patch("update_all.updaters.shutil.which", return_value="/usr/local/bin/yarn"):
+    with patch("update_all.updaters._tool_available", return_value=True):
         mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="1.22.19", stderr="")
         with patch("update_all.updaters.subprocess.run", return_value=mock_result):
             assert _yarn_v1_present() is True
