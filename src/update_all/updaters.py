@@ -171,12 +171,10 @@ def all_updaters() -> list[Updater]:
             error_lines=10,
         ),
         Updater(
-            label="VSCODE",
-            description="VS Code extensions",
-            check=lambda: shutil.which("code") is not None,
-            commands=[
-                'code --list-extensions | while read -r ext; do [ -n "$ext" ] && code --install-extension "$ext" --force; done'
-            ],
+            label="HERMES",
+            description="Hermes Agent CLI",
+            check=lambda: shutil.which("hermes") is not None,
+            commands=["hermes update"],
             error_lines=15,
         ),
         Updater(

@@ -9,7 +9,7 @@ from update_all.updaters import all_updaters, _brew_commands, _yarn_v1_present, 
 EXPECTED_LABELS = [
     "BREW", "APT", "SNAP", "FLATPAK",
     "MAS", "NPM", "PNPM", "YARN", "PIPX",
-    "RUST", "CARGO", "ASDF", "MISE", "VSCODE", "CLAUDE", "OMZ",
+    "RUST", "CARGO", "ASDF", "MISE", "HERMES", "CLAUDE", "OMZ",
 ]
 
 
@@ -40,6 +40,14 @@ def test_all_updaters_have_commands():
 def test_all_updaters_have_description():
     for updater in all_updaters():
         assert updater.description, f"{updater.label} has empty description"
+
+
+def test_hermes_updater():
+    hermes = next(updater for updater in all_updaters() if updater.label == "HERMES")
+    assert hermes.description == "Hermes Agent CLI"
+    assert hermes.commands == ["hermes update"]
+    with patch("update_all.updaters.shutil.which", return_value="/usr/local/bin/hermes"):
+        assert hermes.check() is True
 
 
 def test_brew_commands_cask_on_macos():
