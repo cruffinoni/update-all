@@ -1,5 +1,6 @@
 """Tests for update_all.runner."""
 
+import threading
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -98,6 +99,7 @@ def test_execute_job_calls_on_line_callback():
 def test_execute_job_pty_auto_answers_prompt():
     from update_all.runner import _execute_job
 
+    lines_seen: list[str] = []
     updater = Updater(
         label="BREWLIKE",
         commands=['printf "Proceed? [y/N] "; read ans; echo "GOT-answer=$ans"'],
@@ -105,9 +107,10 @@ def test_execute_job_pty_auto_answers_prompt():
         description="prompting updater",
         responder=PromptResponder(),
     )
-    result = _execute_job(updater)
+    result = _execute_job(updater, on_line=lines_seen.append)
     assert result.succeeded
     assert "GOT-answer=y" in result.output
+    assert any("Proceed? [y/N]" in line and "auto-answered: y" in line for line in lines_seen)
 
 
 def test_execute_job_pty_answers_newline_terminated_prompt():
@@ -157,6 +160,121 @@ def test_execute_job_pty_streams_lines():
     assert result.succeeded
     assert "line1" in lines_seen
     assert "line2" in lines_seen
+
+
+def test_execute_job_pty_streams_carriage_return_progress_before_completion():
+    from update_all.runner import _execute_job
+
+    progress_seen = threading.Event()
+    lines_seen: list[str] = []
+
+    updater = Updater(
+        label="APT",
+        commands=["printf 'apt progress 1\\r'; sleep 0.4; printf 'apt progress 2\\r'; printf 'done\\n'"],
+        check=lambda: True,
+        description="apt-like updater",
+        needs_sudo=True,
+    )
+
+    def on_line(line: str) -> None:
+        lines_seen.append(line)
+        if line == "apt progress 1":
+            progress_seen.set()
+
+    result_holder: list[object] = []
+    thread = threading.Thread(target=lambda: result_holder.append(_execute_job(updater, on_line=on_line)))
+    thread.start()
+    assert progress_seen.wait(timeout=1.0)
+    assert thread.is_alive()
+    thread.join(timeout=2.0)
+
+    assert not thread.is_alive()
+    result = result_holder[0]
+    assert result.succeeded
+    assert "apt progress 1\napt progress 2\ndone" in result.output
+    assert lines_seen[:2] == ["apt progress 1", "apt progress 2"]
+
+
+def test_execute_job_reports_command_start_marker():
+    from update_all.runner import _execute_job
+
+    commands_seen: list[str] = []
+    updater = Updater(
+        label="APT",
+        commands=["printf 'done\\n'"],
+        check=lambda: True,
+        description="apt-like updater",
+        needs_sudo=True,
+    )
+
+    result = _execute_job(updater, on_command=commands_seen.append)
+
+    assert result.succeeded
+    assert commands_seen == ["printf 'done\\n'"]
+
+
+def test_execute_job_reports_process_pid():
+    from update_all.runner import _execute_job
+
+    pids_seen: list[int] = []
+    result = _execute_job(_echo_updater("PID"), on_process_start=pids_seen.append)
+
+    assert result.succeeded
+    assert len(pids_seen) == 1
+    assert pids_seen[0] > 0
+
+
+def test_terminate_pty_process_stops_its_process_group():
+    from update_all import runner
+
+    proc = MagicMock()
+    proc.pid = 12345
+    proc.poll.return_value = None
+
+    with patch("update_all.runner.os.killpg") as killpg:
+        runner._terminate_pty_process(proc)
+
+    killpg.assert_called_once_with(12345, runner.signal.SIGTERM)
+    proc.wait.assert_called_once_with(timeout=5)
+
+
+def test_execute_job_reports_cached_sudo_response():
+    from update_all.password import PasswordBroker
+    from update_all.runner import _execute_job
+
+    lines_seen: list[str] = []
+    broker = PasswordBroker(prompt_fn=lambda ctx, reprompt: "secret")
+    broker.get_password([], reprompt=False)
+    updater = Updater(
+        label="APT",
+        commands=['printf "[sudo] password for test: "; read -s password; echo; echo "GOT=$password"'],
+        check=lambda: True,
+        needs_sudo=True,
+        description="sudo updater",
+    )
+
+    result = _execute_job(updater, on_line=lines_seen.append, broker=broker)
+
+    assert result.succeeded
+    assert "GOT=secret" in result.output
+    assert "[sudo] password requested — supplying cached credential" in lines_seen
+
+
+def test_run_sequential_apt_dashboard_shows_command_and_output():
+    updater = Updater(
+        label="APT",
+        commands=["printf 'apt done\\n'"],
+        check=lambda: True,
+        is_sequential=True,
+        needs_sudo=True,
+        description="apt-like updater",
+    )
+    dashboard = _make_dashboard()
+
+    results = run_sequential([updater], _make_console(), dashboard)
+
+    assert results[0].succeeded
+    assert list(dashboard._views["APT"].lines) == ["$ printf 'apt done\\n'", "apt done"]
 
 
 def test_execute_job_without_responder_uses_pipe_path():
@@ -290,13 +408,25 @@ def test_run_sequential_background_rewrites_sudo_for_needs_sudo_updater():
 def test_run_sequential_foreground_keeps_sudo_unchanged():
     captured: list[str] = []
 
-    def fake_popen(args, **_kwargs):
-        captured.append(args[2])
-        mock = MagicMock()
-        mock.stdout = iter([])
-        mock.returncode = 0
-        mock.wait.return_value = 0
-        return mock
+    class FakeProcess:
+        pid = 123
+
+        @staticmethod
+        def poll():
+            return 0
+
+        @staticmethod
+        def wait():
+            return 0
+
+    def fake_spawn(cmd):
+        import os
+        import pty
+
+        captured.append(cmd)
+        master, slave = pty.openpty()
+        os.close(slave)
+        return FakeProcess(), master
 
     updater = Updater(
         label="APT",
@@ -305,7 +435,7 @@ def test_run_sequential_foreground_keeps_sudo_unchanged():
         needs_sudo=True,
         description="test",
     )
-    with patch("update_all.runner.subprocess.Popen", side_effect=fake_popen):
+    with patch("update_all.runner._spawn_pty_process", side_effect=fake_spawn):
         run_sequential([updater], _make_console(), _make_dashboard(), background=False)
 
     assert captured == ["sudo apt update"]
@@ -332,6 +462,31 @@ def test_dashboard_window_rolls_to_last_five_lines():
     view = dashboard._views["BREW"]
     assert list(view.lines) == [f"line-{i}" for i in range(2, 7)]
     assert len(view.lines) == _WINDOW
+
+
+def test_dashboard_preserves_long_log_lines():
+    dashboard = _make_dashboard()
+    long_line = "x" * 120
+    dashboard.register("BREW")
+    dashboard.start("BREW")
+
+    dashboard.line("BREW", long_line)
+
+    assert list(dashboard._views["BREW"].lines) == [long_line]
+
+
+def test_dashboard_shows_silent_process_details():
+    from update_all import runner
+
+    dashboard = _make_dashboard()
+    dashboard.register("APT")
+    dashboard.start("APT")
+    dashboard.process("APT", 12345)
+    dashboard._views["APT"].last_output = runner.time.monotonic() - runner._SILENCE_NOTICE_SECONDS
+
+    rendered = "\n".join(_rendered_lines(dashboard))
+    assert "pid 12345" in rendered
+    assert "waiting for output" in rendered
 
 
 def test_dashboard_running_job_reserves_five_log_slots():
