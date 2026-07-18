@@ -41,4 +41,7 @@ class SudoKeepalive:
 
     def _loop(self) -> None:
         while not self._stop_event.wait(self._interval):
-            subprocess.run(["sudo", "-v"], check=False)
+            # Never prompt from the daemon thread: Rich's live dashboard owns
+            # the terminal, and a hidden sudo prompt would make updates appear
+            # hung. The foreground updater PTY handles any visible re-prompt.
+            subprocess.run(["sudo", "-n", "-v"], check=False)

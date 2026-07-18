@@ -13,15 +13,17 @@ from typing import Annotated
 
 import rich.box
 import typer
+from typer._click.exceptions import UsageError
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
 from update_all import agent, idempotency, notify
+from update_all import __version__
 from update_all.password import PasswordBroker
 from update_all.runner import JobDashboard, JobResult, fmt_duration, run_parallel, run_sequential
 from update_all.sudo import SudoKeepalive
-from update_all.updaters import all_updaters
+from update_all.updaters import Updater, all_updaters
 
 
 app = typer.Typer(
@@ -42,11 +44,23 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else 0
+    except UsageError as exc:
+        typer.echo(f"Error: {exc.format_message()}", err=True)
+        if exc.ctx is not None:
+            typer.echo(exc.ctx.get_help())
+        return 2
+
+
+def _show_version(value: bool) -> None:
+    if value:
+        typer.echo(f"update-all {__version__}")
+        raise typer.Exit(0)
 
 
 @app.callback(invoke_without_command=True)
 def run(
     ctx: typer.Context,
+    version: Annotated[bool, typer.Option("--version", callback=_show_version, is_eager=True, help="Show the version and exit.")] = False,
     do_os: Annotated[bool, typer.Option("--os/--no-os", help="Include OS system updates (macOS: softwareupdate; Linux: apt full-upgrade). Requires sudo.")] = False,
     jobs: Annotated[int, typer.Option("--jobs", help="Max parallel workers")] = 0,
     only: Annotated[str | None, typer.Option("--only", help="Comma-separated labels to run exclusively")] = None,
@@ -103,7 +117,6 @@ def run(
 
     start_ts = time.monotonic()
     keepalive: SudoKeepalive | None = None
-
     try:
         updaters = all_updaters()
 
@@ -115,46 +128,53 @@ def run(
             skip_labels = {lbl.strip().upper() for lbl in skip.split(",")}
             updaters = [u for u in updaters if u.label not in skip_labels]
 
-        needs_sudo = do_os or (not background and any(u.needs_sudo for u in updaters if u.check()))
-        if needs_sudo:
-            console.print("[bold]⚠  sudo required — enter your password once:[/bold]")
-            keepalive = SudoKeepalive()
-            keepalive.start()
-
         sequential_updaters = [u for u in updaters if u.is_sequential]
         parallel_updaters   = [u for u in updaters if not u.is_sequential]
 
         dashboard = JobDashboard(console, disabled=background)
         broker = PasswordBroker(pause=dashboard.pause)
 
+        needs_sudo = do_os or (not background and any(u.needs_sudo for u in updaters if u.check()))
+
         seq_results: list[JobResult] = []
         par_results: list[JobResult] = []
         os_results: list[JobResult] = []
 
         with dashboard:
+            if needs_sudo:
+                console.print("[bold]⚠  sudo required — enter your password once:[/bold]")
+                # sudo timestamps are normally scoped to a tty. Updaters run in
+                # their own PTYs, so authenticate through the shared broker
+                # rather than `sudo -v` on the parent terminal.
+                broker.get_password([], reprompt=False)
+
             if sequential_updaters:
                 seq_results = run_sequential(sequential_updaters, console, dashboard, background=background, broker=broker)
 
             if parallel_updaters:
                 par_results = run_parallel(parallel_updaters, max_workers, console, dashboard, background=background, broker=broker)
 
-        if do_os:
-            if sys.platform == "darwin":
-                os_commands = ["sudo softwareupdate -l", "sudo softwareupdate -ia --verbose"]
-            else:
-                os_commands = ["sudo apt full-upgrade -y", "sudo apt autoremove -y"]
-            console.print()
-            console.print("[bold] OS [/bold]  [dim]system updates[/dim]")
-            os_exit = 0
-            os_start = time.monotonic()
-            for cmd in os_commands:
-                proc = subprocess.run(["bash", "-lc", cmd], capture_output=False, check=False)
-                if os_exit == 0 and proc.returncode != 0:
-                    os_exit = proc.returncode
-            os_duration = time.monotonic() - os_start
-            icon = "[green]✓[/green]" if os_exit == 0 else "[red]✗[/red]"
-            console.print(f"{icon} OS  {fmt_duration(os_duration)}")
-            os_results = [JobResult(label="OS", exit_code=os_exit, output="", duration=os_duration, succeeded=os_exit == 0, error_lines=0)]
+            if do_os:
+                if sys.platform == "darwin":
+                    os_commands = ["sudo softwareupdate -l", "sudo softwareupdate -ia --verbose"]
+                else:
+                    os_commands = ["sudo apt full-upgrade -y", "sudo apt autoremove -y"]
+                os_results = run_sequential(
+                    [
+                        Updater(
+                            label="OS",
+                            description="system updates",
+                            check=lambda: True,
+                            is_sequential=True,
+                            needs_sudo=True,
+                            commands=os_commands,
+                            error_lines=20,
+                        )
+                    ],
+                    console,
+                    dashboard,
+                    broker=broker,
+                )
 
         all_results = seq_results + par_results + os_results
         _print_failures(all_results, console)
@@ -243,7 +263,7 @@ def _extract_notes(result: JobResult) -> str:
     if not result.succeeded:
         for line in out.splitlines():
             if "error:" in line.lower():
-                return line.strip()[:60]
+                return line.strip()
     lines = [line for line in out.splitlines() if line.strip()]
     return f"{len(lines)} lines" if lines else "—"
 

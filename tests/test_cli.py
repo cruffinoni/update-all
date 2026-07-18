@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 
 import update_all.agent as agent_module
 from update_all.cli import _extract_notes, app
+from update_all import __version__
 from update_all.runner import JobResult
 
 runner = CliRunner()
@@ -51,6 +52,28 @@ def test_logs_with_content(patch_log_path):
     assert result.exit_code == 0
     assert "brew update" in result.output
     assert "brew upgrade" in result.output
+
+
+def test_version():
+    result = runner.invoke(app, ["--version"])
+    assert result.exit_code == 0
+    assert f"update-all {__version__}" in result.output
+
+
+def test_unknown_root_option_shows_help_without_traceback():
+    result = runner.invoke(app, ["--unknown"])
+    assert result.exit_code == 2
+    assert "Error" in result.output
+    assert "Usage:" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_unknown_logs_option_shows_logs_help_without_traceback():
+    result = runner.invoke(app, ["logs", "--unknown"])
+    assert result.exit_code == 2
+    assert "Error" in result.output
+    assert "Usage: update-all logs [OPTIONS]" in result.output
+    assert "Traceback" not in result.output
 
 
 def test_extract_notes_no_output_returns_dash():
@@ -108,3 +131,14 @@ def test_extract_notes_failed_job_shows_error_line():
     )
     notes = _extract_notes(result)
     assert "error:" in notes
+
+
+def test_extract_notes_does_not_truncate_long_error_line():
+    error_line = "error: " + ("details " * 20)
+    result = JobResult(
+        label="CARGO", exit_code=1,
+        output=f"Updating registry\n{error_line}\naborting",
+        duration=5.0, succeeded=False,
+    )
+
+    assert _extract_notes(result) == error_line.strip()

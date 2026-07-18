@@ -86,6 +86,11 @@ class PasswordBroker:
                     self._password = self._prompt_fn(context_lines, reprompt)
             return (self._password + "\n").encode()
 
+    def has_cached_password(self) -> bool:
+        """Return whether a password can be supplied without prompting the user."""
+        with self._lock():
+            return self._password is not None
+
     @staticmethod
     def _default_prompt(context_lines: list[str], reprompt: bool) -> str:
         with open("/dev/tty", "w") as tty:
