@@ -1,13 +1,15 @@
 """Tests for the update_all.cli logs subcommand and summary helpers."""
 
 from pathlib import Path
+from subprocess import CompletedProcess
 from unittest.mock import patch
 
 import pytest
+from rich.console import Console
 from typer.testing import CliRunner
 
 import update_all.agent as agent_module
-from update_all.cli import _extract_notes, app
+from update_all.cli import _extract_notes, _print_versions, app
 from update_all import __version__
 from update_all.runner import JobResult
 
@@ -58,6 +60,95 @@ def test_version():
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
     assert f"update-all {__version__}" in result.output
+
+
+def test_help_includes_update_command():
+    result = runner.invoke(app, ["--help"])
+
+    assert result.exit_code == 0
+    assert "update" in result.output
+
+
+def test_update_uses_uv_to_install_latest_pypi_package():
+    with patch("update_all.cli.shutil.which", return_value="/usr/bin/uv"), \
+         patch("update_all.cli.subprocess.run", return_value=CompletedProcess([], 0)) as run:
+        result = runner.invoke(app, ["update"])
+
+    assert result.exit_code == 0
+    run.assert_called_once_with(
+        ["/usr/bin/uv", "tool", "install", "update-all@latest", "--force"],
+        check=False,
+    )
+    assert "updated successfully" in result.output
+
+
+def test_update_requires_uv():
+    with patch("update_all.cli.shutil.which", return_value=None), \
+         patch("update_all.cli.subprocess.run") as run:
+        result = runner.invoke(app, ["update"])
+
+    assert result.exit_code == 1
+    assert "uv is required" in result.output
+    run.assert_not_called()
+
+
+def test_update_propagates_uv_failure():
+    with patch("update_all.cli.shutil.which", return_value="/usr/bin/uv"), \
+         patch("update_all.cli.subprocess.run", return_value=CompletedProcess([], 7)):
+        result = runner.invoke(app, ["update"])
+
+    assert result.exit_code == 7
+
+
+def test_update_does_not_run_normal_update_flow():
+    with patch("update_all.cli.shutil.which", return_value="/usr/bin/uv"), \
+         patch("update_all.cli.subprocess.run", return_value=CompletedProcess([], 0)), \
+         patch("update_all.cli.all_updaters") as all_updaters, \
+         patch("update_all.cli.idempotency.already_ran_today") as already_ran:
+        result = runner.invoke(app, ["update"])
+
+    assert result.exit_code == 0
+    all_updaters.assert_not_called()
+    already_ran.assert_not_called()
+
+
+def test_print_versions_skips_code_on_linux_even_when_on_path():
+    def which(name):
+        return "/usr/bin/code" if name == "code" else None
+
+    with patch("update_all.commands.sys.platform", "linux"), \
+         patch("update_all.commands.shutil.which", side_effect=which), \
+         patch("update_all.commands.subprocess.run", return_value=CompletedProcess([], 1)), \
+         patch("update_all.cli.subprocess") as cli_subprocess:
+        _print_versions(Console())
+
+    cli_subprocess.run.assert_not_called()
+
+
+def test_print_versions_skips_claude_when_not_installed():
+    with patch("update_all.commands.shutil.which", return_value=None), \
+         patch("update_all.commands.subprocess.run", return_value=CompletedProcess([], 1)), \
+         patch("update_all.cli.subprocess") as cli_subprocess:
+        _print_versions(Console())
+
+    cli_subprocess.run.assert_not_called()
+
+
+def test_print_versions_probes_code_on_macos_when_available():
+    def which(name):
+        return "/usr/local/bin/code" if name == "code" else None
+
+    result = type("Result", (), {"stdout": "1.2.3\n", "stderr": ""})()
+    with patch("update_all.commands.sys.platform", "darwin"), \
+         patch("update_all.commands.shutil.which", side_effect=which), \
+         patch("update_all.commands.subprocess.run", return_value=CompletedProcess([], 1)), \
+         patch("update_all.cli.subprocess") as cli_subprocess:
+        cli_subprocess.run.return_value = result
+        _print_versions(Console())
+
+    cli_subprocess.run.assert_called_once_with(
+        ["code", "--version"], capture_output=True, text=True, check=False, timeout=5
+    )
 
 
 def test_unknown_root_option_shows_help_without_traceback():

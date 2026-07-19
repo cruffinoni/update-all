@@ -20,6 +20,7 @@ from rich.table import Table
 
 from update_all import agent, idempotency, notify
 from update_all import __version__
+from update_all.commands import COMMAND_SPECS, VERSION_COMMANDS
 from update_all.password import PasswordBroker
 from update_all.runner import JobDashboard, JobResult, fmt_duration, run_parallel, run_sequential
 from update_all.sudo import SudoKeepalive
@@ -131,10 +132,17 @@ def run(
         sequential_updaters = [u for u in updaters if u.is_sequential]
         parallel_updaters   = [u for u in updaters if not u.is_sequential]
 
+        os_spec = None
+        if do_os:
+            os_spec = COMMAND_SPECS["softwareupdate" if sys.platform == "darwin" else "apt"]
+
         dashboard = JobDashboard(console, disabled=background)
         broker = PasswordBroker(pause=dashboard.pause)
 
-        needs_sudo = do_os or (not background and any(u.needs_sudo for u in updaters if u.check()))
+        needs_sudo = (
+            (os_spec is not None and os_spec.available())
+            or (not background and any(u.needs_sudo for u in updaters if u.check()))
+        )
 
         seq_results: list[JobResult] = []
         par_results: list[JobResult] = []
@@ -154,7 +162,7 @@ def run(
             if parallel_updaters:
                 par_results = run_parallel(parallel_updaters, max_workers, console, dashboard, background=background, broker=broker)
 
-            if do_os:
+            if do_os and os_spec is not None and os_spec.available():
                 if sys.platform == "darwin":
                     os_commands = ["sudo softwareupdate -l", "sudo softwareupdate -ia --verbose"]
                 else:
@@ -164,7 +172,7 @@ def run(
                         Updater(
                             label="OS",
                             description="system updates",
-                            check=lambda: True,
+                            check=os_spec.available,
                             is_sequential=True,
                             needs_sudo=True,
                             commands=os_commands,
@@ -201,6 +209,28 @@ def run(
     finally:
         if keepalive is not None:
             keepalive.stop()
+
+
+@app.command("update")
+def self_update() -> None:
+    """Update update-all itself from PyPI using uv."""
+    uv = shutil.which("uv")
+    if uv is None:
+        typer.echo(
+            "Error: uv is required to update update-all. "
+            "Install uv, then run 'update-all update' again.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    result = subprocess.run(
+        [uv, "tool", "install", "update-all@latest", "--force"],
+        check=False,
+    )
+    if result.returncode != 0:
+        raise typer.Exit(result.returncode)
+
+    typer.echo("update-all updated successfully.")
 
 
 @app.command()
@@ -306,25 +336,16 @@ def _print_summary(results: list[JobResult], elapsed: float, console: Console) -
 
 def _print_versions(console: Console) -> None:
     """Print versions of detected tools."""
-    tools = [
-        ("brew",    ["brew", "--version"]),
-        ("node",    ["node", "-v"]),
-        ("npm",     ["npm", "-v"]),
-        ("pnpm",    ["pnpm", "-v"]),
-        ("yarn",    ["yarn", "-v"]),
-        ("rustc",   ["rustc", "-V"]),
-        ("go",      ["go", "version"]),
-        ("python3", ["python3", "--version"]),
-        ("code",    ["code", "--version"]),
-        ("claude",  ["claude", "--version"]),
-    ]
     console.print()
     console.print("[dim]Versions[/dim]")
-    for name, cmd in tools:
-        if shutil.which(name) is None:
+    for spec in VERSION_COMMANDS:
+        if not spec.available():
             continue
+        name = spec.executable
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=5)
+            result = subprocess.run(
+                spec.version_command(), capture_output=True, text=True, check=False, timeout=5
+            )
             version_line = (result.stdout or result.stderr).splitlines()[0] if (result.stdout or result.stderr) else ""
             if version_line:
                 console.print(f"[dim]{name}[/dim]  {version_line}", highlight=False)
