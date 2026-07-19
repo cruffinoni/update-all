@@ -9,7 +9,7 @@ It skips tools that are not installed, runs independent updates in parallel, and
 Production install with `uv`:
 
 ```bash
-uv tool install . --force --python 3.11
+uv tool install update-all@latest --force --python 3.11
 ```
 
 Editable development install:
@@ -27,6 +27,7 @@ update-all --only BREW,NPM
 update-all --skip CLAUDE
 update-all --jobs 4
 update-all --force
+update-all update
 update-all logs
 ```
 
@@ -42,6 +43,7 @@ Useful options:
 | `--background` | Run without interactive output, skip OS updates, and log to a file. |
 | `--install-agent` | Install a LaunchAgent on macOS or a systemd timer on Linux. |
 | `--uninstall-agent` | Remove the background scheduler. |
+| `update` | Update `update-all` itself from PyPI using `uv`. |
 | `logs` | Display the latest background-run log. |
 
 ## Updates performed

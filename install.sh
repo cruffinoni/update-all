@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="https://github.com/cruffinoni/update-all"
 BOLD='\033[1m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -33,7 +32,7 @@ else
 fi
 
 # --- Install update-all ---
-uv tool install "git+${REPO}" --force --python 3.11
+uv tool install "update-all@latest" --force --python 3.11
 ok "update-all installed"
 
 # Ensure the uv tool bin dir is on PATH

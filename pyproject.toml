@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "update-all"
 version = "1.0.2"
 description = "macOS and Linux dev machine package manager updater"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["rich>=14.0.0", "typer>=0.12.0"]
 
