@@ -4,6 +4,7 @@ import shutil
 import subprocess
 from unittest.mock import patch
 
+from update_all.commands import COMMAND_SPECS
 from update_all.updaters import all_updaters, _brew_commands, _yarn_v1_present, _cargo_install_update_present
 
 EXPECTED_LABELS = [
@@ -46,8 +47,28 @@ def test_hermes_updater():
     hermes = next(updater for updater in all_updaters() if updater.label == "HERMES")
     assert hermes.description == "Hermes Agent CLI"
     assert hermes.commands == ["hermes update"]
-    with patch("update_all.updaters.shutil.which", return_value="/usr/local/bin/hermes"):
+    with patch("update_all.commands.shutil.which", return_value="/usr/local/bin/hermes"):
         assert hermes.check() is True
+
+
+def test_mas_updater_is_unavailable_on_linux():
+    mas = next(updater for updater in all_updaters() if updater.label == "MAS")
+    with patch("update_all.commands.sys.platform", "linux"), \
+         patch("update_all.commands.shutil.which", return_value="/usr/bin/mas"):
+        assert mas.check() is False
+
+
+def test_claude_updater_is_unavailable_when_missing():
+    claude = next(updater for updater in all_updaters() if updater.label == "CLAUDE")
+    with patch("update_all.commands.shutil.which", return_value=None):
+        assert claude.check() is False
+
+
+def test_code_command_is_only_available_on_macos():
+    with patch("update_all.commands.sys.platform", "linux"), \
+         patch("update_all.commands.shutil.which", return_value="/usr/bin/code") as which:
+        assert COMMAND_SPECS["code"].available() is False
+    which.assert_not_called()
 
 
 def test_brew_commands_cask_on_macos():
@@ -84,13 +105,13 @@ def test_yarn_check_yarn_v1():
 
 
 def test_cargo_check_not_in_path():
-    with patch("update_all.updaters.shutil.which", return_value=None):
+    with patch("update_all.commands.shutil.which", return_value=None):
         assert _cargo_install_update_present() is False
 
 
 def test_cargo_check_in_path():
     from update_all.updaters import _cargo_install_update_present
-    with patch("update_all.updaters.shutil.which", return_value="/usr/local/bin/cargo-install-update"):
+    with patch("update_all.commands.shutil.which", return_value="/usr/local/bin/cargo-install-update"):
         assert _cargo_install_update_present() is True
 
 

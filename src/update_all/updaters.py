@@ -9,22 +9,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from update_all.commands import COMMAND_SPECS, NVM_PREFIX
 from update_all.responder import PromptResponder
 
-# nvm hooks into interactive shells only, so a bare `bash -lc` never sees it.
-# Sourcing nvm.sh puts the active node/npm/pnpm/yarn on PATH for these commands.
-_NVM = 'export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" >/dev/null 2>&1; '
-
-
 def _tool_available(name: str) -> bool:
-    """True if ``name`` resolves in a login shell with nvm sourced."""
-    result = subprocess.run(
-        ["bash", "-lc", f"{_NVM} command -v {name}"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return result.returncode == 0
+    """True if an NVM-managed tool resolves in a login shell."""
+    return COMMAND_SPECS[name].available()
 
 
 @dataclass
@@ -46,7 +36,7 @@ def _yarn_v1_present() -> bool:
         return False
     try:
         result = subprocess.run(
-            ["bash", "-lc", f"{_NVM} yarn --version"], capture_output=True, text=True, check=False
+            ["bash", "-lc", f"{NVM_PREFIX} yarn --version"], capture_output=True, text=True, check=False
         )
         major = int(result.stdout.strip().split(".")[0])
         return major == 1
@@ -55,7 +45,7 @@ def _yarn_v1_present() -> bool:
 
 
 def _cargo_install_update_present() -> bool:
-    return shutil.which("cargo-install-update") is not None
+    return COMMAND_SPECS["cargo-install-update"].available()
 
 
 def _brew_commands() -> list[str]:
@@ -72,7 +62,7 @@ def all_updaters() -> list[Updater]:
         Updater(
             label="BREW",
             description="Homebrew formulae & casks",
-            check=lambda: shutil.which("brew") is not None,
+            check=COMMAND_SPECS["brew"].available,
             is_sequential=True,
             commands=_brew_commands(),
             error_lines=30,
@@ -81,7 +71,7 @@ def all_updaters() -> list[Updater]:
         Updater(
             label="APT",
             description="APT system packages",
-            check=lambda: shutil.which("apt") is not None,
+            check=COMMAND_SPECS["apt"].available,
             is_sequential=True,
             needs_sudo=True,
             commands=[
@@ -95,7 +85,7 @@ def all_updaters() -> list[Updater]:
         Updater(
             label="SNAP",
             description="Snap packages",
-            check=lambda: shutil.which("snap") is not None,
+            check=COMMAND_SPECS["snap"].available,
             needs_sudo=True,
             commands=["sudo snap refresh"],
             error_lines=15,
@@ -103,14 +93,14 @@ def all_updaters() -> list[Updater]:
         Updater(
             label="FLATPAK",
             description="Flatpak packages",
-            check=lambda: shutil.which("flatpak") is not None,
+            check=COMMAND_SPECS["flatpak"].available,
             commands=["flatpak update -y"],
             error_lines=15,
         ),
         Updater(
             label="MAS",
             description="Mac App Store",
-            check=lambda: shutil.which("mas") is not None,
+            check=COMMAND_SPECS["mas"].available,
             commands=["mas upgrade"],
             error_lines=10,
         ),
@@ -118,34 +108,34 @@ def all_updaters() -> list[Updater]:
             label="NPM",
             description="npm global packages",
             check=lambda: _tool_available("npm"),
-            commands=[f"{_NVM} npm update -g"],
+            commands=[f"{NVM_PREFIX} npm update -g"],
             error_lines=20,
         ),
         Updater(
             label="PNPM",
             description="pnpm global packages",
             check=lambda: _tool_available("pnpm"),
-            commands=[f"{_NVM} pnpm update -g"],
+            commands=[f"{NVM_PREFIX} pnpm update -g"],
             error_lines=10,
         ),
         Updater(
             label="YARN",
             description="Yarn global packages",
             check=_yarn_v1_present,
-            commands=[f"{_NVM} yarn global upgrade"],
+            commands=[f"{NVM_PREFIX} yarn global upgrade"],
             error_lines=15,
         ),
         Updater(
             label="PIPX",
             description="pipx packages",
-            check=lambda: shutil.which("pipx") is not None,
+            check=COMMAND_SPECS["pipx"].available,
             commands=["pipx upgrade-all --include-injected"],
             error_lines=25,
         ),
         Updater(
             label="RUST",
             description="Rust toolchain (rustup)",
-            check=lambda: shutil.which("rustup") is not None,
+            check=COMMAND_SPECS["rustup"].available,
             commands=["rustup self update && rustup update"],
             error_lines=15,
         ),
@@ -159,28 +149,28 @@ def all_updaters() -> list[Updater]:
         Updater(
             label="ASDF",
             description="asdf plugins",
-            check=lambda: shutil.which("asdf") is not None,
+            check=COMMAND_SPECS["asdf"].available,
             commands=["asdf update && asdf plugin-update --all"],
             error_lines=15,
         ),
         Updater(
             label="MISE",
             description="mise toolchain",
-            check=lambda: shutil.which("mise") is not None,
+            check=COMMAND_SPECS["mise"].available,
             commands=["mise self-update -y && mise upgrade -y"],
             error_lines=10,
         ),
         Updater(
             label="HERMES",
             description="Hermes Agent CLI",
-            check=lambda: shutil.which("hermes") is not None,
+            check=COMMAND_SPECS["hermes"].available,
             commands=["hermes update"],
             error_lines=15,
         ),
         Updater(
             label="CLAUDE",
             description="Claude CLI",
-            check=lambda: shutil.which("claude") is not None,
+            check=COMMAND_SPECS["claude"].available,
             commands=["claude update"],
             error_lines=10,
         ),
