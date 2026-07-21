@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "update-all"
-version = "2.0.1"
+version = "2.0.2"
 description = "macOS and Linux dev machine package manager updater"
 readme = "README.md"
 requires-python = ">=3.11"
