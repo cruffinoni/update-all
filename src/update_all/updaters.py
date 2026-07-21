@@ -25,6 +25,7 @@ class Updater:
     commands: list[str]
     check: Callable[[], bool]
     is_sequential: bool = False
+    requires_os: bool = False
     needs_sudo: bool = False
     description: str = ""
     error_lines: int = 20
@@ -73,6 +74,7 @@ def all_updaters() -> list[Updater]:
             description="APT system packages",
             check=COMMAND_SPECS["apt"].available,
             is_sequential=True,
+            requires_os=True,
             needs_sudo=True,
             commands=[
                 "sudo apt update",
@@ -86,6 +88,7 @@ def all_updaters() -> list[Updater]:
             label="SNAP",
             description="Snap packages",
             check=COMMAND_SPECS["snap"].available,
+            requires_os=True,
             needs_sudo=True,
             commands=["sudo snap refresh"],
             error_lines=15,
