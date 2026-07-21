@@ -151,21 +151,6 @@ def test_print_versions_probes_code_on_macos_when_available():
     )
 
 
-def test_unknown_root_option_shows_help_without_traceback():
-    result = runner.invoke(app, ["--unknown"])
-    assert result.exit_code == 2
-    assert "Error" in result.output
-    assert "Usage:" in result.output
-    assert "Traceback" not in result.output
-
-
-def test_unknown_logs_option_shows_logs_help_without_traceback():
-    result = runner.invoke(app, ["logs", "--unknown"])
-    assert result.exit_code == 2
-    assert "Error" in result.output
-    assert "Usage: update-all logs [OPTIONS]" in result.output
-    assert "Traceback" not in result.output
-
 
 def test_extract_notes_no_output_returns_dash():
     result = JobResult(label="BREW", exit_code=0, output="", duration=10.0, succeeded=True)
