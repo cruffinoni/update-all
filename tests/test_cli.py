@@ -12,6 +12,7 @@ import update_all.agent as agent_module
 from update_all.cli import _extract_notes, _print_versions, app
 from update_all import __version__
 from update_all.runner import JobResult
+from update_all.updaters import Updater
 
 runner = CliRunner()
 
@@ -110,6 +111,30 @@ def test_update_does_not_run_normal_update_flow():
     assert result.exit_code == 0
     all_updaters.assert_not_called()
     already_ran.assert_not_called()
+
+
+def test_run_excludes_os_updaters_without_os_flag():
+    apt = Updater(
+        label="APT",
+        commands=["sudo apt update"],
+        check=lambda: True,
+        is_sequential=True,
+        requires_os=True,
+        needs_sudo=True,
+    )
+    npm = Updater(label="NPM", commands=["npm update -g"], check=lambda: True)
+
+    with patch("update_all.cli.all_updaters", return_value=[apt, npm]), \
+         patch("update_all.cli.run_sequential", return_value=[]) as run_sequential, \
+         patch("update_all.cli.run_parallel", return_value=[]) as run_parallel, \
+         patch("update_all.cli.idempotency.mark_ran_today"), \
+         patch("update_all.cli.notify.send"), \
+         patch("update_all.cli._print_versions"):
+        result = runner.invoke(app, ["--force", "--no-colors"])
+
+    assert result.exit_code == 0
+    run_sequential.assert_not_called()
+    assert [updater.label for updater in run_parallel.call_args.args[0]] == ["NPM"]
 
 
 def test_print_versions_skips_code_on_linux_even_when_on_path():

@@ -134,6 +134,9 @@ def run(
     try:
         updaters = all_updaters()
 
+        if not do_os:
+            updaters = [u for u in updaters if not u.requires_os]
+
         if only:
             only_labels = {lbl.strip().upper() for lbl in only.split(",")}
             updaters = [u for u in updaters if u.label in only_labels]

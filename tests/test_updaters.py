@@ -121,6 +121,12 @@ def test_apt_and_snap_need_sudo():
     assert updaters["SNAP"].needs_sudo is True
 
 
+def test_apt_and_snap_require_os_flag():
+    updaters = {u.label: u for u in all_updaters()}
+    assert updaters["APT"].requires_os is True
+    assert updaters["SNAP"].requires_os is True
+
+
 def test_non_sudo_updaters_do_not_need_sudo():
     updaters = {u.label: u for u in all_updaters()}
     for label in ("BREW", "NPM", "PIPX", "RUST", "FLATPAK"):
