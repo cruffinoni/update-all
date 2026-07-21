@@ -260,6 +260,26 @@ def test_execute_job_reports_cached_sudo_response():
     assert "[sudo] password requested — supplying cached credential" in lines_seen
 
 
+def test_execute_job_pty_answers_sudo_rs_password_prompt():
+    from update_all.password import PasswordBroker
+    from update_all.runner import _execute_job
+
+    broker = PasswordBroker(prompt_fn=lambda ctx, reprompt: "secret")
+    broker.get_password([], reprompt=False)
+    updater = Updater(
+        label="APT",
+        commands=['printf "[sudo: authenticate] Password: "; read -s password; echo; echo "GOT=$password"'],
+        check=lambda: True,
+        needs_sudo=True,
+        description="sudo-rs updater",
+    )
+
+    result = _execute_job(updater, broker=broker)
+
+    assert result.succeeded
+    assert "GOT=secret" in result.output
+
+
 def test_run_sequential_apt_dashboard_shows_command_and_output():
     updater = Updater(
         label="APT",
@@ -354,6 +374,8 @@ def test_password_regex_matches_platform_prompts():
     assert _PASSWORD_RE.search("Password: ")
     assert _PASSWORD_RE.search("[sudo] password for alice:")
     assert _PASSWORD_RE.search("==> Installing\n[sudo] password for bob: ")
+    assert _PASSWORD_RE.search("[sudo: authenticate] Password:")
+    assert _PASSWORD_RE.search("[sudo: authenticate] Password:   ")
 
 
 def test_password_regex_ignores_non_prompts():
@@ -362,6 +384,7 @@ def test_password_regex_ignores_non_prompts():
     assert not _PASSWORD_RE.search("Downloading package...")
     assert not _PASSWORD_RE.search("Proceed? [y/N] ")
     assert not _PASSWORD_RE.search("Enter your password here and press go")
+    assert not _PASSWORD_RE.search("[sudo: authenticate] PIN:")
 
 
 def test_run_parallel_skips_when_check_false():

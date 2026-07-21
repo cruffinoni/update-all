@@ -31,7 +31,7 @@ _SILENCE_NOTICE_SECONDS = 10
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 # A sudo password prompt at the end of the current output tail.
 _PASSWORD_RE = re.compile(
-    r"(?:^|\n)[ \t]*(?:password:|\[sudo\] password for .+?:)[ \t]*\Z",
+    r"(?:^|\n)[ \t]*(?:password:|\[sudo\] password for .+?:|\[sudo: authenticate\] password:)[ \t]*\Z",
     re.IGNORECASE,
 )
 # Emitted by sudo after a rejected attempt → re-prompt with a fresh password.
