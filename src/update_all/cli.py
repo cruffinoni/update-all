@@ -13,7 +13,10 @@ from typing import Annotated
 
 import rich.box
 import typer
-from typer._click.exceptions import UsageError
+try:
+    from typer._click.exceptions import UsageError
+except ImportError:
+    from click.exceptions import UsageError
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
@@ -36,8 +39,18 @@ app = typer.Typer(
 )
 
 
+_NO_COLOR_ARGS = ("--no-colors", "--no-color", "--background")
+
+
+def _color_disabled(argv: list[str] | None) -> bool:
+    args = argv if argv is not None else sys.argv[1:]
+    return any(arg in _NO_COLOR_ARGS for arg in args)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point wired to the update-all console script."""
+    if _color_disabled(argv):
+        os.environ["NO_COLOR"] = "1"
     try:
         result = app(standalone_mode=False, args=argv)
         if isinstance(result, int):
@@ -70,13 +83,13 @@ def run(
     install_agent: Annotated[bool, typer.Option("--install-agent", help="Install LaunchAgent (macOS) or systemd timer (Linux) for auto-run")] = False,
     uninstall_agent: Annotated[bool, typer.Option("--uninstall-agent", help="Remove LaunchAgent (macOS) or systemd timer (Linux)")] = False,
     force: Annotated[bool, typer.Option("--force", help="Override daily idempotency check")] = False,
-    no_colors: Annotated[bool, typer.Option("--no-colors", help="Disable colored output")] = False,
+    no_colors: Annotated[bool, typer.Option("--no-colors", "--no-color", help="Disable colored output")] = False,
 ) -> None:
     if ctx.invoked_subcommand is not None:
         return
 
     use_color = not no_colors and not background
-    console = Console(no_color=not use_color)
+    console = Console(no_color=None if use_color else True)
 
     if install_agent:
         agent.install(console)
@@ -235,10 +248,10 @@ def self_update() -> None:
 
 @app.command()
 def logs(
-    no_colors: Annotated[bool, typer.Option("--no-colors", help="Disable colored output")] = False,
+    no_colors: Annotated[bool, typer.Option("--no-colors", "--no-color", help="Disable colored output")] = False,
 ) -> None:
     """Display the log from the latest background run."""
-    console = Console(no_color=no_colors)
+    console = Console(no_color=True if no_colors else None)
     if not agent.LOG_PATH.exists():
         console.print(f"[yellow]⚠[/yellow] No log file found. Expected: {agent.LOG_PATH}")
         if sys.platform == "darwin":
