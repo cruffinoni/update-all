@@ -25,7 +25,7 @@ from update_all import agent, idempotency, notify
 from update_all import __version__
 from update_all.commands import COMMAND_SPECS, VERSION_COMMANDS
 from update_all.password import PasswordBroker
-from update_all.runner import JobDashboard, JobResult, fmt_duration, run_parallel, run_sequential
+from update_all.runner import JobDashboard, JobResult, fmt_duration, run_parallel, run_sequential, verify_sudo_password
 from update_all.sudo import SudoKeepalive
 from update_all.updaters import Updater, all_updaters
 
@@ -170,7 +170,16 @@ def run(
                 # sudo timestamps are normally scoped to a tty. Updaters run in
                 # their own PTYs, so authenticate through the shared broker
                 # rather than `sudo -v` on the parent terminal.
-                broker.get_password([], reprompt=False)
+                verification = verify_sudo_password(broker, on_line=lambda l: console.print(f"  {escape(l)}", highlight=False))
+                if not verification.succeeded:
+                    console.print(
+                        f"[red]✗[/red] sudo authentication failed (exit {verification.exit_code}) — "
+                        "aborting before running any updaters."
+                    )
+                    if verification.output:
+                        for line in verification.output.splitlines()[-10:]:
+                            console.print(f"  [dim]{escape(line)}[/dim]", highlight=False)
+                    raise typer.Exit(1)
 
             if sequential_updaters:
                 seq_results = run_sequential(sequential_updaters, console, dashboard, background=background, broker=broker)

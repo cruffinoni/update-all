@@ -2,6 +2,7 @@
 
 import threading
 import time
+from unittest.mock import mock_open, patch
 
 from update_all.password import PasswordBroker, _FIFOLock
 
@@ -66,6 +67,38 @@ def test_reprompt_invalidates_cache():
     assert broker.get_password([], reprompt=False) == b"wrong\n"
     assert broker.get_password([], reprompt=True) == b"right\n"
     assert calls == [False, True]
+
+
+def test_peek_password_returns_none_before_any_prompt():
+    broker = PasswordBroker(prompt_fn=lambda ctx, reprompt: "secret")
+    assert broker.peek_password() is None
+
+
+def test_peek_password_returns_cached_value_without_prompting():
+    calls: list[bool] = []
+
+    def prompt(ctx, reprompt):
+        calls.append(reprompt)
+        return "secret"
+
+    broker = PasswordBroker(prompt_fn=prompt)
+    broker.get_password([], reprompt=False)
+
+    assert broker.peek_password() == "secret"
+    assert calls == [False]  # peek did not trigger another prompt
+
+
+def test_default_prompt_does_not_write_duplicate_rejection_banner():
+    # The caller (runner.py's _answer) already announces a rejected
+    # password via its own single on_line message; _default_prompt must
+    # not also print a second "try again" notice for the same event.
+    m = mock_open()
+    with patch("builtins.open", m), patch("update_all.password.getpass.getpass", return_value="pw"):
+        PasswordBroker._default_prompt(["some context"], True)
+
+    written = "".join(call.args[0] for call in m().write.call_args_list)
+    assert "try again" not in written.lower()
+    assert "some context" in written
 
 
 def test_pause_is_entered_while_prompting():

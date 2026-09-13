@@ -86,6 +86,15 @@ class PasswordBroker:
                     self._password = self._prompt_fn(context_lines, reprompt)
             return (self._password + "\n").encode()
 
+    def peek_password(self) -> str | None:
+        """Return the cached password without prompting.
+
+        For redacting a known secret out of captured output — never for
+        answering a prompt, which must go through ``get_password`` so
+        serialization/caching stays correct.
+        """
+        return self._password
+
     def has_cached_password(self) -> bool:
         """Return whether a password can be supplied without prompting the user."""
         with self._lock():
@@ -93,9 +102,11 @@ class PasswordBroker:
 
     @staticmethod
     def _default_prompt(context_lines: list[str], reprompt: bool) -> str:
+        # `reprompt` isn't used here: the caller already announces a rejected
+        # password via its own on_line message (the single, unified place
+        # that happens), so this doesn't also print a second "try again"
+        # notice for the same event.
         with open("/dev/tty", "w") as tty:
-            if reprompt:
-                tty.write("  Sorry, try again.\n")
             for line in context_lines:
                 tty.write(f"    {line}\n")
             tty.flush()

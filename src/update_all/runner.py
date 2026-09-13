@@ -10,6 +10,7 @@ import select
 import signal
 import subprocess
 import sys
+import termios
 import time
 from collections import deque
 from collections.abc import Callable, Iterator
@@ -62,6 +63,21 @@ class JobResult:
     error_lines: int = 20
 
 
+def _disable_echo(fd: int) -> None:
+    """Turn off local echo on the pty.
+
+    update-all never has a live human typing into this pty — it always
+    injects bytes itself (sudo passwords, y/N answers) via ``os.write``. With
+    echo on, the line discipline reflects those injected bytes straight back
+    into the output stream we capture and may display or log, including a
+    plaintext sudo password. Only ``ECHO`` is cleared; canonical line
+    buffering is untouched.
+    """
+    attrs = termios.tcgetattr(fd)
+    attrs[3] &= ~termios.ECHO  # lflag
+    termios.tcsetattr(fd, termios.TCSANOW, attrs)
+
+
 def _spawn_pty_process(cmd: str) -> tuple[subprocess.Popen[bytes], int]:
     """Run ``cmd`` with the PTY as its controlling terminal.
 
@@ -71,6 +87,7 @@ def _spawn_pty_process(cmd: str) -> tuple[subprocess.Popen[bytes], int]:
     without forking from the parallel worker threads.
     """
     master, slave = pty.openpty()
+    _disable_echo(slave)
     try:
         proc = subprocess.Popen(
             [sys.executable, "-m", "update_all.pty_exec", os.ttyname(slave), cmd],
@@ -96,7 +113,7 @@ def _terminate_pty_process(proc: subprocess.Popen[bytes]) -> None:
     except ProcessLookupError:
         return
     try:
-        proc.wait(timeout=5)
+        proc.wait(timeout=2)
     except subprocess.TimeoutExpired:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
@@ -340,6 +357,18 @@ def _execute_job(
     )
 
 
+def _redact(text: str, broker: PasswordBroker | None) -> str:
+    """Scrub the broker's cached sudo password out of captured output.
+
+    A second, independent line of defense alongside disabling pty echo —
+    in case some tool echoes back what it was fed regardless of terminal
+    settings, the password should never end up in ``JobResult.output`` or
+    anything printed/logged from it.
+    """
+    password = broker.peek_password() if broker is not None else None
+    return text.replace(password, "********") if password else text
+
+
 def _execute_job_pty(
     updater: Updater,
     on_line: Callable[[str], None] = lambda _: None,
@@ -413,7 +442,7 @@ def _execute_job_pty(
                 pending = pending[index + 1 :]
                 if delimiter == "\r" and pending.startswith("\n"):
                     pending = pending[1:]
-                line = line.rstrip("\r")
+                line = _redact(line.rstrip("\r"), broker)
                 output_parts.append(line)
                 if not pending_shown:
                     on_line(line)
@@ -443,6 +472,13 @@ def _execute_job_pty(
                     # Process is alive but idle — likely blocked on a read after
                     # printing a newline-terminated prompt. Answer the last line.
                     _answer(pending or last_line, already_displayed=not bool(pending))
+        except KeyboardInterrupt:
+            # Acknowledge immediately — the teardown below can take up to a
+            # couple of seconds, and with no feedback in that window it looks
+            # like the interrupt was ignored, inviting a second Ctrl+C.
+            on_line("Cancelling…")
+            _terminate_pty_process(proc)
+            raise
         except BaseException:
             _terminate_pty_process(proc)
             raise
@@ -450,9 +486,10 @@ def _execute_job_pty(
             os.close(master)
 
         if pending:
-            output_parts.append(pending.rstrip("\r"))
+            tail = _redact(pending.rstrip("\r"), broker)
+            output_parts.append(tail)
             if not pending_shown:
-                on_line(pending.rstrip("\r"))
+                on_line(tail)
         command_exit_code = proc.wait()
         if exit_code == 0 and command_exit_code != 0:
             exit_code = command_exit_code
@@ -467,6 +504,44 @@ def _execute_job_pty(
         description=updater.description,
         error_lines=updater.error_lines,
     )
+
+
+def verify_sudo_password(
+    broker: PasswordBroker,
+    on_line: Callable[[str], None] = lambda _: None,
+    max_attempts: int = 3,
+) -> JobResult:
+    """Confirm the password broker will hand out to real jobs is valid.
+
+    Runs `sudo -k -v` through the same pty-answering path used for real
+    updater commands, so a wrong password is caught once, up front,
+    instead of surfacing later as an unrelated-looking failure in every
+    job that happens to need sudo. `-k` discards any cached timestamp so
+    an already-valid ambient credential can't mask a wrong password
+    typed here.
+
+    If a run fails without sudo ever having actually rejected a password
+    (no ``_PW_FAIL_RE`` match anywhere in the output — e.g. a transient
+    bootstrap hiccup rather than a real "wrong password"), retry a few
+    times automatically instead of surfacing a bare failure that would
+    otherwise require the user to relaunch the whole CLI. A genuine
+    rejection is never retried beyond what sudo itself already allowed.
+    """
+    probe = Updater(
+        label="SUDO",
+        description="verify sudo credentials",
+        check=lambda: True,
+        needs_sudo=True,
+        commands=["sudo -k -v"],
+    )
+    result = _execute_job_pty(probe, on_line=on_line, broker=broker)
+    attempt = 1
+    while not result.succeeded and attempt < max_attempts and not _PW_FAIL_RE.search(result.output):
+        attempt += 1
+        on_line(f"[sudo] verification failed unexpectedly — retrying ({attempt}/{max_attempts})…")
+        time.sleep(0.5)
+        result = _execute_job_pty(probe, on_line=on_line, broker=broker)
+    return result
 
 
 def run_parallel(
@@ -512,8 +587,16 @@ def run_parallel(
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(_make_job_runner(u)): u for u in active_updaters}
-        for future in concurrent.futures.as_completed(futures):
-            results.append(future.result())
+        # A plain `as_completed(futures)` parks the main thread in an
+        # unbounded wait; Python only checks for pending signals on the main
+        # thread, so if a worker blocks on a password prompt, Ctrl+C is
+        # swallowed indefinitely. Polling with a short timeout gives the
+        # interpreter loop — and SIGINT — a chance to run periodically.
+        pending = set(futures)
+        while pending:
+            done, pending = concurrent.futures.wait(pending, timeout=0.2, return_when=concurrent.futures.FIRST_COMPLETED)
+            for future in done:
+                results.append(future.result())
 
     order = {u.label: i for i, u in enumerate(active_updaters)}
     results.sort(key=lambda r: order[r.label])

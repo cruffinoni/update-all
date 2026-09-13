@@ -121,7 +121,10 @@ def test_e2e_apt_streams_progress_and_reports_success(tmp_path: Path):
         (
             "sudo",
             """#!/bin/sh
-if [ "$1" = "-v" ]; then
+if [ "$1" = "-v" ] || { [ "$1" = "-k" ] && [ "$2" = "-v" ]; }; then
+    printf '[sudo] password for test: ' >/dev/tty
+    read password </dev/tty
+    [ "$password" = "test-password" ] || exit 1
     exit 0
 fi
 printf '[sudo] password for test: ' >/dev/tty

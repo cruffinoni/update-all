@@ -137,6 +137,55 @@ def test_run_excludes_os_updaters_without_os_flag():
     assert [updater.label for updater in run_parallel.call_args.args[0]] == ["NPM"]
 
 
+def test_run_aborts_before_updaters_when_sudo_verification_fails():
+    apt = Updater(
+        label="APT",
+        commands=["sudo apt update"],
+        check=lambda: True,
+        is_sequential=True,
+        needs_sudo=True,
+    )
+    failing = JobResult(label="SUDO", exit_code=1, output="", duration=0.0, succeeded=False)
+
+    with patch("update_all.cli.all_updaters", return_value=[apt]), \
+         patch("update_all.cli.verify_sudo_password", return_value=failing) as verify, \
+         patch("update_all.cli.run_sequential") as run_sequential, \
+         patch("update_all.cli.run_parallel") as run_parallel, \
+         patch("update_all.cli.idempotency.mark_ran_today"), \
+         patch("update_all.cli.notify.send"):
+        result = runner.invoke(app, ["--force", "--no-colors"])
+
+    assert result.exit_code == 1
+    verify.assert_called_once()
+    run_sequential.assert_not_called()
+    run_parallel.assert_not_called()
+    assert "sudo authentication failed" in result.output
+
+
+def test_run_proceeds_after_successful_sudo_verification():
+    apt = Updater(
+        label="APT",
+        commands=["sudo apt update"],
+        check=lambda: True,
+        is_sequential=True,
+        needs_sudo=True,
+    )
+    passing = JobResult(label="SUDO", exit_code=0, output="", duration=0.0, succeeded=True)
+
+    with patch("update_all.cli.all_updaters", return_value=[apt]), \
+         patch("update_all.cli.verify_sudo_password", return_value=passing) as verify, \
+         patch("update_all.cli.run_sequential", return_value=[]) as run_sequential, \
+         patch("update_all.cli.run_parallel", return_value=[]) as run_parallel, \
+         patch("update_all.cli.idempotency.mark_ran_today"), \
+         patch("update_all.cli.notify.send"), \
+         patch("update_all.cli._print_versions"):
+        result = runner.invoke(app, ["--force", "--no-colors"])
+
+    assert result.exit_code == 0
+    verify.assert_called_once()
+    run_sequential.assert_called_once()
+
+
 def test_print_versions_skips_code_on_linux_even_when_on_path():
     def which(name):
         return "/usr/bin/code" if name == "code" else None

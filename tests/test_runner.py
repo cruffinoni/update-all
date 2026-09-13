@@ -7,7 +7,7 @@ import pytest
 from rich.console import Console
 
 from update_all.responder import PromptResponder
-from update_all.runner import JobDashboard, JobResult, run_sequential, run_parallel
+from update_all.runner import JobDashboard, JobResult, run_sequential, run_parallel, verify_sudo_password
 from update_all.updaters import Updater
 
 
@@ -235,7 +235,7 @@ def test_terminate_pty_process_stops_its_process_group():
         runner._terminate_pty_process(proc)
 
     killpg.assert_called_once_with(12345, runner.signal.SIGTERM)
-    proc.wait.assert_called_once_with(timeout=5)
+    proc.wait.assert_called_once_with(timeout=2)
 
 
 def test_execute_job_reports_cached_sudo_response():
@@ -247,7 +247,10 @@ def test_execute_job_reports_cached_sudo_response():
     broker.get_password([], reprompt=False)
     updater = Updater(
         label="APT",
-        commands=['printf "[sudo] password for test: "; read -s password; echo; echo "GOT=$password"'],
+        commands=[
+            'printf "[sudo] password for test: "; read -s password; echo; '
+            '[ "$password" = "secret" ] && echo MATCH || echo MISMATCH'
+        ],
         check=lambda: True,
         needs_sudo=True,
         description="sudo updater",
@@ -256,7 +259,8 @@ def test_execute_job_reports_cached_sudo_response():
     result = _execute_job(updater, on_line=lines_seen.append, broker=broker)
 
     assert result.succeeded
-    assert "GOT=secret" in result.output
+    assert "MATCH" in result.output
+    assert "secret" not in result.output
     assert "[sudo] password requested — supplying cached credential" in lines_seen
 
 
@@ -268,7 +272,10 @@ def test_execute_job_pty_answers_sudo_rs_password_prompt():
     broker.get_password([], reprompt=False)
     updater = Updater(
         label="APT",
-        commands=['printf "[sudo: authenticate] Password: "; read -s password; echo; echo "GOT=$password"'],
+        commands=[
+            'printf "[sudo: authenticate] Password: "; read -s password; echo; '
+            '[ "$password" = "secret" ] && echo MATCH || echo MISMATCH'
+        ],
         check=lambda: True,
         needs_sudo=True,
         description="sudo-rs updater",
@@ -277,7 +284,8 @@ def test_execute_job_pty_answers_sudo_rs_password_prompt():
     result = _execute_job(updater, broker=broker)
 
     assert result.succeeded
-    assert "GOT=secret" in result.output
+    assert "MATCH" in result.output
+    assert "secret" not in result.output
 
 
 def test_run_sequential_apt_dashboard_shows_command_and_output():
@@ -334,14 +342,18 @@ def test_execute_job_pty_answers_password_prompt():
     broker = PasswordBroker(prompt_fn=lambda ctx, reprompt: "hunter2")
     updater = Updater(
         label="APT",
-        commands=['printf "Password: "; read -s p; echo; echo "GOT=$p"'],
+        commands=[
+            'printf "Password: "; read -s p; echo; '
+            '[ "$p" = "hunter2" ] && echo MATCH || echo MISMATCH'
+        ],
         check=lambda: True,
         needs_sudo=True,
         description="sudo updater",
     )
     result = _execute_job(updater, broker=broker)
     assert result.succeeded
-    assert "GOT=hunter2" in result.output
+    assert "MATCH" in result.output
+    assert "hunter2" not in result.output
 
 
 def test_execute_job_pty_password_prompt_gets_context_lines():
@@ -365,6 +377,226 @@ def test_execute_job_pty_password_prompt_gets_context_lines():
     result = _execute_job(updater, broker=broker)
     assert result.succeeded
     assert seen_context and "==> Installing foo" in seen_context[0]
+
+
+def test_verify_sudo_password_probes_with_sudo_dash_k_dash_v():
+    from update_all import runner
+
+    broker = MagicMock()
+    fake_result = JobResult(label="SUDO", exit_code=0, output="", duration=0.0, succeeded=True)
+
+    with patch.object(runner, "_execute_job_pty", return_value=fake_result) as pty_mock:
+        result = verify_sudo_password(broker)
+
+    assert result is fake_result
+    pty_mock.assert_called_once()
+    probe = pty_mock.call_args.args[0]
+    assert probe.commands == ["sudo -k -v"]
+    assert probe.needs_sudo is True
+    assert pty_mock.call_args.kwargs["broker"] is broker
+
+
+def test_execute_job_pty_retries_after_wrong_sudo_password_then_succeeds():
+    from update_all.password import PasswordBroker
+    from update_all.runner import _execute_job
+
+    attempts = iter(["wrong", "correct"])
+    broker = PasswordBroker(prompt_fn=lambda ctx, reprompt: next(attempts))
+    lines_seen: list[str] = []
+    updater = Updater(
+        label="SUDO",
+        commands=[
+            'printf "[sudo] password for test: "; read -s p1; echo; '
+            'if [ "$p1" = "correct" ]; then exit 0; fi; '
+            'echo "Sorry, try again."; '
+            'printf "[sudo] password for test: "; read -s p2; echo; '
+            '[ "$p2" = "correct" ]'
+        ],
+        check=lambda: True,
+        needs_sudo=True,
+        description="sudo probe",
+    )
+
+    result = _execute_job(updater, on_line=lines_seen.append, broker=broker)
+
+    assert result.succeeded
+    # Exactly one rejection notice for the one wrong entry — not duplicated.
+    rejections = [l for l in lines_seen if l == "[sudo] password rejected — requesting it again"]
+    assert len(rejections) == 1
+
+
+def test_execute_job_pty_fails_when_sudo_password_never_correct():
+    from update_all.password import PasswordBroker
+    from update_all.runner import _execute_job
+
+    broker = PasswordBroker(prompt_fn=lambda ctx, reprompt: "wrong")
+    updater = Updater(
+        label="SUDO",
+        commands=[
+            'printf "[sudo] password for test: "; read -s p; echo; '
+            '[ "$p" = "correct" ] || { echo "Sorry, try again."; exit 1; }'
+        ],
+        check=lambda: True,
+        needs_sudo=True,
+        description="sudo probe",
+    )
+
+    result = _execute_job(updater, broker=broker)
+
+    assert result.succeeded is False
+    assert result.exit_code != 0
+
+
+def test_spawn_pty_process_disables_echo():
+    import os
+    import termios
+
+    from update_all.runner import _spawn_pty_process, _terminate_pty_process
+
+    proc, master = _spawn_pty_process("sleep 0.2")
+    try:
+        attrs = termios.tcgetattr(master)
+        assert not (attrs[3] & termios.ECHO)
+    finally:
+        _terminate_pty_process(proc)
+        os.close(master)
+
+
+def test_execute_job_pty_does_not_leak_password_via_echo():
+    from update_all.password import PasswordBroker
+    from update_all.runner import _execute_job
+
+    broker = PasswordBroker(prompt_fn=lambda ctx, reprompt: "supersecret")
+    updater = Updater(
+        label="OS",
+        commands=[
+            # Deliberately omits `-s`, unlike every other prompt test here:
+            # a script that doesn't suppress its own echo is exactly what
+            # exposed the leak this guards against. This is an end-to-end
+            # check backed by two independent layers (pty echo disabled in
+            # _spawn_pty_process, plus _redact as a backstop) — confirmed by
+            # temporarily reverting _disable_echo and observing the raw
+            # (pre-redaction) output actually contained the password.
+            'printf "[sudo] password for test: "; read password; echo; echo done'
+        ],
+        check=lambda: True,
+        needs_sudo=True,
+        description="os updater",
+    )
+
+    result = _execute_job(updater, broker=broker)
+
+    assert result.succeeded
+    assert "supersecret" not in result.output
+
+
+def test_redact_scrubs_cached_password_from_text():
+    from update_all.password import PasswordBroker
+    from update_all.runner import _redact
+
+    broker = PasswordBroker(prompt_fn=lambda ctx, reprompt: "supersecret")
+    broker.get_password([], reprompt=False)
+
+    assert _redact("value=supersecret end", broker) == "value=******** end"
+
+
+def test_redact_is_noop_without_cached_password():
+    from update_all.password import PasswordBroker
+    from update_all.runner import _redact
+
+    broker = PasswordBroker(prompt_fn=lambda ctx, reprompt: "supersecret")
+
+    assert _redact("hello world", broker) == "hello world"
+    assert _redact("hello world", None) == "hello world"
+
+
+def test_verify_sudo_password_retries_on_failure_without_rejection_text():
+    from update_all.password import PasswordBroker
+
+    broker = PasswordBroker(prompt_fn=lambda ctx, reprompt: "secret")
+    calls = {"count": 0}
+
+    def fake_execute(probe, on_line=lambda _: None, broker=None):
+        calls["count"] += 1
+        if calls["count"] < 3:
+            return JobResult(
+                label="SUDO", exit_code=1,
+                output="sudo: a terminal is required to read the password",
+                duration=0.0, succeeded=False,
+            )
+        return JobResult(label="SUDO", exit_code=0, output="", duration=0.0, succeeded=True)
+
+    with patch("update_all.runner._execute_job_pty", side_effect=fake_execute), \
+         patch("update_all.runner.time.sleep"):
+        result = verify_sudo_password(broker, max_attempts=3)
+
+    assert result.succeeded
+    assert calls["count"] == 3
+
+
+def test_verify_sudo_password_does_not_retry_after_genuine_rejection():
+    from update_all.password import PasswordBroker
+
+    broker = PasswordBroker(prompt_fn=lambda ctx, reprompt: "wrong")
+    calls = {"count": 0}
+
+    def fake_execute(probe, on_line=lambda _: None, broker=None):
+        calls["count"] += 1
+        return JobResult(
+            label="SUDO", exit_code=1,
+            output="Sorry, try again.\nsudo: 3 incorrect password attempts",
+            duration=0.0, succeeded=False,
+        )
+
+    with patch("update_all.runner._execute_job_pty", side_effect=fake_execute), \
+         patch("update_all.runner.time.sleep"):
+        result = verify_sudo_password(broker, max_attempts=3)
+
+    assert result.succeeded is False
+    assert calls["count"] == 1
+
+
+def test_execute_job_pty_prints_cancelling_message_on_keyboard_interrupt():
+    from update_all import runner
+    from update_all.runner import _execute_job
+
+    lines_seen: list[str] = []
+    updater = Updater(
+        label="SUDO",
+        commands=["sleep 0.1"],
+        check=lambda: True,
+        needs_sudo=True,
+        description="",
+    )
+
+    with patch("update_all.runner.select.select", side_effect=KeyboardInterrupt), \
+         patch.object(runner, "_terminate_pty_process", wraps=runner._terminate_pty_process) as terminate_mock:
+        with pytest.raises(KeyboardInterrupt):
+            _execute_job(updater, on_line=lines_seen.append)
+
+    assert lines_seen == ["Cancelling…"]
+    terminate_mock.assert_called_once()
+
+
+def test_run_parallel_uses_bounded_wait_not_as_completed():
+    from update_all import runner
+
+    updater = _echo_updater("PARWAIT", "echo hi")
+
+    with patch.object(runner.concurrent.futures, "as_completed") as as_completed_mock:
+        run_parallel([updater], max_workers=2, console=_make_console(), dashboard=_make_dashboard())
+
+    as_completed_mock.assert_not_called()
+
+
+def test_run_parallel_propagates_keyboard_interrupt_promptly():
+    from update_all import runner
+
+    updater = _echo_updater("PARINT", "sleep 0.2")
+
+    with patch.object(runner.concurrent.futures, "wait", side_effect=KeyboardInterrupt):
+        with pytest.raises(KeyboardInterrupt):
+            run_parallel([updater], max_workers=2, console=_make_console(), dashboard=_make_dashboard())
 
 
 def test_password_regex_matches_platform_prompts():
