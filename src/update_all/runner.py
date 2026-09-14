@@ -399,7 +399,7 @@ def _execute_job_pty(
         answered = False  # guard so a single prompt is answered once
 
         def _answer(candidate: str, *, already_displayed: bool = False) -> bool:
-            nonlocal answered, pending_shown
+            nonlocal answered, pending, pending_shown
             if answered or not candidate.strip():
                 return False
             if broker is not None and _PASSWORD_RE.search(_ANSI_RE.sub("", candidate)):
@@ -420,11 +420,18 @@ def _execute_job_pty(
             if response is None:
                 return False
             answer = response.decode("utf-8", "replace").strip() or "input"
+            if not already_displayed:
+                # The prompt has no delimiter, so it is still in ``pending``.
+                # Record it as a completed output item before the answer can
+                # cause the child to emit its next line; otherwise that line
+                # gets merged into the prompt and hidden by ``pending_shown``.
+                output_parts.append(_redact(candidate.rstrip("\r"), broker))
+                pending = ""
             if already_displayed:
                 on_line(f"    auto-answered: {answer}")
             else:
                 on_line(f"{candidate.rstrip()} [auto-answered: {answer}]")
-                pending_shown = True
+                pending_shown = False
             os.write(master, response)
             answered = True
             return True

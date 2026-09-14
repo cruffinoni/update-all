@@ -113,6 +113,25 @@ def test_execute_job_pty_auto_answers_prompt():
     assert any("Proceed? [y/N]" in line and "auto-answered: y" in line for line in lines_seen)
 
 
+def test_execute_job_pty_keeps_output_after_unterminated_prompt_visible():
+    from update_all.runner import _execute_job
+
+    lines_seen: list[str] = []
+    updater = Updater(
+        label="BREWLIKE",
+        commands=['printf "Proceed? [y/N] "; read ans; printf "received=%s\\n" "$ans"'],
+        check=lambda: True,
+        description="prompting updater",
+        responder=PromptResponder(),
+    )
+
+    result = _execute_job(updater, on_line=lines_seen.append)
+
+    assert result.succeeded
+    assert "received=y" in result.output
+    assert "received=y" in lines_seen
+
+
 def test_execute_job_pty_answers_newline_terminated_prompt():
     # Brew prints the question on its own line, then blocks on a separate read.
     from update_all.runner import _execute_job
