@@ -9,13 +9,27 @@ It skips tools that are not installed, runs independent updates in parallel, and
 Production install with `uv`:
 
 ```bash
-uv tool install update-all@latest --force --python 3.11
+uv tool install update-all@latest
 ```
 
 Editable development install:
 
 ```bash
 pip install -e ".[dev]"
+```
+
+## Update
+
+Upgrade an existing `uv` installation:
+
+```bash
+uv tool upgrade update-all
+```
+
+You can also update the package using its built-in command (requires `uv`):
+
+```bash
+update-all update
 ```
 
 ## Usage
