@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.0.7] - 2026-09-20
+
+### Added
+- Version bump to 2.0.7
+
+
 ### Fixed
 - Fix sudo password retries reported on Ubuntu 26.04.1 LTS: request a fresh password after "Authentication failed, try again." instead of reusing the rejected credential.
 
