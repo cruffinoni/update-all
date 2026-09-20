@@ -415,7 +415,12 @@ def test_verify_sudo_password_probes_with_sudo_dash_k_dash_v():
     assert pty_mock.call_args.kwargs["broker"] is broker
 
 
-def test_execute_job_pty_retries_after_wrong_sudo_password_then_succeeds():
+@pytest.mark.parametrize(("prompt", "rejection"), [
+    ("[sudo] password for test:", "Sorry, try again."),
+    ("[sudo] password for test:", "Authentication failure"),
+    ("[sudo: authenticate] Password:", "sudo: Authentication failed, try again."),
+])
+def test_execute_job_pty_retries_after_wrong_sudo_password_then_succeeds(prompt, rejection):
     from update_all.password import PasswordBroker
     from update_all.runner import _execute_job
 
@@ -425,10 +430,10 @@ def test_execute_job_pty_retries_after_wrong_sudo_password_then_succeeds():
     updater = Updater(
         label="SUDO",
         commands=[
-            'printf "[sudo] password for test: "; read -s p1; echo; '
+            f'printf "{prompt} "; read -s p1; echo; '
             'if [ "$p1" = "correct" ]; then exit 0; fi; '
-            'echo "Sorry, try again."; '
-            'printf "[sudo] password for test: "; read -s p2; echo; '
+            f'echo "{rejection}"; '
+            f'printf "{prompt} "; read -s p2; echo; '
             '[ "$p2" = "correct" ]'
         ],
         check=lambda: True,
@@ -553,7 +558,12 @@ def test_verify_sudo_password_retries_on_failure_without_rejection_text():
     assert calls["count"] == 3
 
 
-def test_verify_sudo_password_does_not_retry_after_genuine_rejection():
+@pytest.mark.parametrize("rejection", [
+    "Sorry, try again.",
+    "Authentication failure",
+    "sudo: Authentication failed, try again.",
+])
+def test_verify_sudo_password_does_not_retry_after_genuine_rejection(rejection):
     from update_all.password import PasswordBroker
 
     broker = PasswordBroker(prompt_fn=lambda ctx, reprompt: "wrong")
@@ -563,7 +573,7 @@ def test_verify_sudo_password_does_not_retry_after_genuine_rejection():
         calls["count"] += 1
         return JobResult(
             label="SUDO", exit_code=1,
-            output="Sorry, try again.\nsudo: 3 incorrect password attempts",
+            output=f"{rejection}\nsudo: 3 incorrect password attempts",
             duration=0.0, succeeded=False,
         )
 

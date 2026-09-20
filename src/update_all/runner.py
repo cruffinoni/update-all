@@ -36,7 +36,7 @@ _PASSWORD_RE = re.compile(
     re.IGNORECASE,
 )
 # Emitted by sudo after a rejected attempt → re-prompt with a fresh password.
-_PW_FAIL_RE = re.compile(r"sorry, try again\.|authentication failure", re.IGNORECASE)
+_PW_FAIL_RE = re.compile(r"sorry, try again\.|authentication fail(?:ure|ed)", re.IGNORECASE)
 
 
 def fmt_duration(seconds: float) -> str:
