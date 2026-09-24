@@ -62,6 +62,7 @@ COMMAND_SPECS = {
     "cargo-install-update": CommandSpec("cargo-install-update"),
     "asdf": CommandSpec("asdf"),
     "mise": CommandSpec("mise"),
+    "tailscale": CommandSpec("tailscale"),
     "hermes": CommandSpec("hermes"),
     "claude": CommandSpec("claude", ("--version",)),
     "code": CommandSpec(

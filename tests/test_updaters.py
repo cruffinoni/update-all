@@ -10,7 +10,7 @@ from update_all.updaters import all_updaters, _brew_commands, _yarn_v1_present, 
 EXPECTED_LABELS = [
     "BREW", "APT", "SNAP", "FLATPAK",
     "MAS", "NPM", "PNPM", "YARN", "PIPX",
-    "RUST", "CARGO", "ASDF", "MISE", "HERMES", "CLAUDE", "OMZ",
+    "RUST", "CARGO", "ASDF", "MISE", "TAILSCALE", "HERMES", "CLAUDE", "OMZ",
 ]
 
 

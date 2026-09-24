@@ -164,6 +164,13 @@ def all_updaters() -> list[Updater]:
             error_lines=10,
         ),
         Updater(
+            label="TAILSCALE",
+            description="Tailscale",
+            check=COMMAND_SPECS["tailscale"].available,
+            commands=["tailscale update"],
+            error_lines=15,
+        ),
+        Updater(
             label="HERMES",
             description="Hermes Agent CLI",
             check=COMMAND_SPECS["hermes"].available,
