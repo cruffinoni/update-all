@@ -23,6 +23,25 @@ pytest tests/test_runner.py::test_run_sequential_success
 
 No linter is configured in `pyproject.toml`.
 
+## Commit messages
+
+Use the Conventional Commits format used in this repository:
+
+```text
+<type>(<scope>): <short description>
+```
+
+The scope is optional. Use a lowercase type and a concise, lowercase description that starts with an action verb; omit the final period. Common types in the history include `feat`, `fix`, `docs`, `refactor`, `test`, `ci`, and `chore`. Use a scope when it helps identify the affected area, such as `cli`, `runner`, `updaters`, or `release`.
+
+Examples:
+
+```text
+feat(updaters): add Tailscale update support
+fix(runner): preserve output after auto-answered prompts
+docs: document self-update
+chore: bump version to 2.0.8
+```
+
 ## Architecture
 
 `update-all` is a Python CLI tool that updates all package managers on a macOS or Linux developer machine in one command. Entry point: `src/update_all/cli.py` (Typer).
