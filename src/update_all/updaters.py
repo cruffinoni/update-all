@@ -167,7 +167,8 @@ def all_updaters() -> list[Updater]:
             label="TAILSCALE",
             description="Tailscale",
             check=COMMAND_SPECS["tailscale"].available,
-            commands=["tailscale update"],
+            needs_sudo=True,
+            commands=["sudo tailscale update"],
             error_lines=15,
         ),
         Updater(
