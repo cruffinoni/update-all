@@ -486,6 +486,74 @@ def test_spawn_pty_process_disables_echo():
         os.close(master)
 
 
+_CTTY_FAILURE_SCRIPT = (
+    "import os, sys; os.write(int(sys.argv[1]), b'1'); "
+    "os.write(2, b'update-all: cannot claim pty\\n'); os._exit(75)"
+)
+
+
+def _drain(master: int) -> str:
+    import os
+
+    out = b""
+    while True:
+        try:
+            chunk = os.read(master, 4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        out += chunk
+    os.close(master)
+    return out.decode("utf-8", "replace")
+
+
+def _popen_failing_first(n_failures: int):
+    import subprocess
+    import sys
+
+    real_popen = subprocess.Popen
+    calls: list[list[str]] = []
+
+    def fake_popen(args, **kwargs):
+        calls.append(args)
+        if len(calls) <= n_failures:
+            # args = [python, "-m", "update_all.pty_exec", status_fd, slave, cmd]
+            args = [sys.executable, "-c", _CTTY_FAILURE_SCRIPT, *args[3:]]
+        return real_popen(args, **kwargs)
+
+    return fake_popen, calls
+
+
+def test_spawn_pty_process_retries_when_ctty_unavailable():
+    from update_all.runner import _spawn_pty_process
+
+    fake_popen, calls = _popen_failing_first(1)
+    with patch("update_all.runner.subprocess.Popen", side_effect=fake_popen):
+        proc, master = _spawn_pty_process("echo ok")
+    output = _drain(master)
+
+    assert proc.wait() == 0
+    assert len(calls) == 2
+    assert calls[0][4] != calls[1][4]  # retried on a different PTY device
+    assert "ok" in output
+    assert "cannot claim pty" not in output
+
+
+def test_spawn_pty_process_gives_up_after_max_attempts():
+    from update_all.runner import _CTTY_ATTEMPTS, _spawn_pty_process
+
+    fake_popen, calls = _popen_failing_first(_CTTY_ATTEMPTS)
+    with patch("update_all.runner.subprocess.Popen", side_effect=fake_popen):
+        proc, master = _spawn_pty_process("echo ok")
+    output = _drain(master)
+
+    assert proc.wait() == 75
+    assert len(calls) == _CTTY_ATTEMPTS
+    assert "cannot claim pty" in output
+    assert "Traceback" not in output
+
+
 def test_execute_job_pty_does_not_leak_password_via_echo():
     from update_all.password import PasswordBroker
     from update_all.runner import _execute_job

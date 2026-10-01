@@ -27,6 +27,7 @@ from update_all.updaters import Updater
 
 _WINDOW = 5
 _SILENCE_NOTICE_SECONDS = 10
+_CTTY_ATTEMPTS = 3
 
 # ANSI SGR/cursor escapes, stripped before matching password prompts.
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -78,30 +79,56 @@ def _disable_echo(fd: int) -> None:
     termios.tcsetattr(fd, termios.TCSANOW, attrs)
 
 
+def _start_bootstrap(cmd: str) -> tuple[subprocess.Popen[bytes], int, bool]:
+    """Launch the PTY bootstrap; the flag reports it could not claim the PTY."""
+    master, slave = pty.openpty()
+    _disable_echo(slave)
+    status_r, status_w = os.pipe()
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "update_all.pty_exec", str(status_w), os.ttyname(slave), cmd],
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            close_fds=True,
+            pass_fds=(status_w,),
+        )
+    except Exception:
+        os.close(master)
+        os.close(status_r)
+        raise
+    finally:
+        os.close(slave)
+        os.close(status_w)
+    with os.fdopen(status_r, "rb") as status:
+        failed = bool(status.read())
+    return proc, master, failed
+
+
 def _spawn_pty_process(cmd: str) -> tuple[subprocess.Popen[bytes], int]:
     """Run ``cmd`` with the PTY as its controlling terminal.
 
     Redirecting stdin/stdout/stderr alone is insufficient for sudo: it opens
     ``/dev/tty`` for authentication. A small bootstrap process makes the slave
     its controlling terminal, keeping the prompt in the stream we supervise
-    without forking from the parallel worker threads.
+    without forking from the parallel worker threads. A bootstrap that cannot
+    claim the PTY is retried on a fresh one.
     """
-    master, slave = pty.openpty()
-    _disable_echo(slave)
+    # Rejected masters stay open until we return so the kernel cannot hand the
+    # same PTY device back on the next attempt.
+    rejected: list[int] = []
     try:
-        proc = subprocess.Popen(
-            [sys.executable, "-m", "update_all.pty_exec", os.ttyname(slave), cmd],
-            stdin=slave,
-            stdout=slave,
-            stderr=slave,
-            close_fds=True,
-        )
-    except Exception:
-        os.close(master)
-        raise
+        for _ in range(_CTTY_ATTEMPTS - 1):
+            proc, master, failed = _start_bootstrap(cmd)
+            if not failed:
+                return proc, master
+            proc.wait()
+            rejected.append(master)
+        proc, master, _ = _start_bootstrap(cmd)
+        return proc, master
     finally:
-        os.close(slave)
-    return proc, master
+        for fd in rejected:
+            os.close(fd)
 
 
 def _terminate_pty_process(proc: subprocess.Popen[bytes]) -> None:
