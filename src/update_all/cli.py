@@ -21,7 +21,7 @@ from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
-from update_all import agent, idempotency, notify
+from update_all import agent, idempotency, notify, self_update
 from update_all import __version__
 from update_all.commands import COMMAND_SPECS, VERSION_COMMANDS
 from update_all.password import PasswordBroker
@@ -115,6 +115,8 @@ def run(
         else:
             console.print(f"[dim]Already ran in the last {fmt_duration(idempotency.THRESHOLD_SECONDS)} — skipping. Use --force to override.[/dim]")
         raise typer.Exit(0)
+
+    _offer_self_update(console, background)
 
     if jobs <= 0:
         max_workers = min(os.cpu_count() or 4, 6)
@@ -236,8 +238,59 @@ def run(
             keepalive.stop()
 
 
+def _install_latest(uv: str) -> int:
+    return subprocess.run(
+        [uv, "tool", "install", "update-all@latest", "--force"],
+        check=False,
+    ).returncode
+
+
+def _is_interactive() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _offer_self_update(console: Console, background: bool) -> None:
+    """Prompt to upgrade update-all when PyPI has a newer release, then re-exec."""
+    if background or os.environ.get(self_update.SKIP_ENV) or not _is_interactive():
+        return
+    uv = shutil.which("uv")
+    if uv is None:
+        return
+    latest = self_update.latest_version()
+    if latest is None or not self_update.is_newer(latest, __version__):
+        return
+    declined = self_update.declined_version()
+    if declined is not None and not self_update.is_newer(latest, declined):
+        return
+
+    try:
+        accepted = typer.confirm(
+            f"[update-all] Version {latest} is available (current {__version__}). Update now?",
+            default=True,
+        )
+    except typer.Abort:
+        raise typer.Exit(130)
+
+    if not accepted:
+        try:
+            self_update.mark_declined(latest)
+        except OSError as exc:
+            console.print(f"[yellow]⚠[/yellow] Could not record declined version: {exc}")
+        console.print("[dim]Run 'update-all update' to update later.[/dim]")
+        return
+
+    if _install_latest(uv) != 0:
+        console.print("[yellow]⚠[/yellow] Self-update failed — continuing with the current version.")
+        return
+
+    os.environ[self_update.SKIP_ENV] = "1"
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execvp(sys.argv[0], sys.argv)
+
+
 @app.command("update")
-def self_update() -> None:
+def update_command() -> None:
     """Update update-all itself from PyPI using uv."""
     uv = shutil.which("uv")
     if uv is None:
@@ -248,12 +301,9 @@ def self_update() -> None:
         )
         raise typer.Exit(1)
 
-    result = subprocess.run(
-        [uv, "tool", "install", "update-all@latest", "--force"],
-        check=False,
-    )
-    if result.returncode != 0:
-        raise typer.Exit(result.returncode)
+    returncode = _install_latest(uv)
+    if returncode != 0:
+        raise typer.Exit(returncode)
 
     typer.echo("update-all updated successfully.")
 

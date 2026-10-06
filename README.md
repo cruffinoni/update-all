@@ -32,6 +32,8 @@ You can also update the package using its built-in command (requires `uv`):
 update-all update
 ```
 
+When you run `update-all` interactively and a newer release is on PyPI, it asks `Update now? [Y/n]` before running updaters, like Oh My Zsh does. Answering yes installs the new version with `uv` and restarts the same command with the same arguments. Answering no skips that version: you will not be asked again until a newer one is published. To be asked again for the skipped version, delete `~/.cache/update-all/declined-version`. The check is skipped in `--background` mode, when `uv` is not installed, and when the terminal is not interactive.
+
 ## Usage
 
 ```bash

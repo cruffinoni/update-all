@@ -1,5 +1,7 @@
 """Tests for the update_all.cli logs subcommand and summary helpers."""
 
+import os
+import sys
 from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
@@ -9,6 +11,7 @@ from rich.console import Console
 from typer.testing import CliRunner
 
 import update_all.agent as agent_module
+import update_all.self_update as self_update_module
 from update_all.cli import _extract_notes, _print_versions, app
 from update_all import __version__
 from update_all.runner import JobResult
@@ -292,3 +295,101 @@ def test_extract_notes_does_not_truncate_long_error_line():
     )
 
     assert _extract_notes(result) == error_line.strip()
+
+
+@pytest.fixture
+def self_update_env(monkeypatch, tmp_path):
+    monkeypatch.setattr(self_update_module, "DECLINED_PATH", tmp_path / "declined-version")
+    with patch.dict(os.environ):
+        os.environ.pop(self_update_module.SKIP_ENV, None)
+        yield tmp_path / "declined-version"
+
+
+def _invoke_run(args, *, latest="9.9.9", interactive=True, install_rc=0, user_input=None):
+    with patch("update_all.cli._is_interactive", return_value=interactive), \
+         patch("update_all.cli.shutil.which", return_value="/usr/bin/uv"), \
+         patch("update_all.cli.self_update.latest_version", return_value=latest) as latest_version, \
+         patch("update_all.cli._install_latest", return_value=install_rc) as install, \
+         patch("update_all.cli.os.execvp") as execvp, \
+         patch("update_all.cli.all_updaters", return_value=[]) as all_updaters, \
+         patch("update_all.cli.idempotency.mark_ran_today"), \
+         patch("update_all.cli.notify.send"), \
+         patch("update_all.cli._print_versions"):
+        result = runner.invoke(app, args, input=user_input)
+        env_guard = os.environ.get(self_update_module.SKIP_ENV)
+    return result, latest_version, install, execvp, all_updaters, env_guard
+
+
+def test_self_update_accepted_installs_and_relaunches(self_update_env):
+    result, _, install, execvp, _, env_guard = _invoke_run(["--force", "--no-colors"], user_input="y\n")
+
+    assert "Version 9.9.9 is available" in result.output
+    install.assert_called_once_with("/usr/bin/uv")
+    execvp.assert_called_once_with(sys.argv[0], sys.argv)
+    assert env_guard == "1"
+
+
+def test_self_update_declined_records_version_and_continues(self_update_env):
+    result, _, install, execvp, all_updaters, _ = _invoke_run(["--force", "--no-colors"], user_input="n\n")
+
+    assert result.exit_code == 0
+    install.assert_not_called()
+    execvp.assert_not_called()
+    all_updaters.assert_called_once()
+    assert self_update_env.read_text() == "9.9.9"
+
+
+def test_self_update_skips_prompt_when_latest_already_declined(self_update_env):
+    self_update_env.write_text("9.9.9")
+    result, _, install, _, all_updaters, _ = _invoke_run(["--force", "--no-colors"])
+
+    assert result.exit_code == 0
+    assert "is available" not in result.output
+    install.assert_not_called()
+    all_updaters.assert_called_once()
+
+
+def test_self_update_prompts_again_for_newer_than_declined(self_update_env):
+    self_update_env.write_text("9.9.8")
+    result, *_ = _invoke_run(["--force", "--no-colors"], user_input="n\n")
+
+    assert "Version 9.9.9 is available" in result.output
+    assert self_update_env.read_text() == "9.9.9"
+
+
+def test_self_update_no_prompt_when_up_to_date(self_update_env):
+    result, *_ = _invoke_run(["--force", "--no-colors"], latest=__version__)
+
+    assert result.exit_code == 0
+    assert "is available" not in result.output
+
+
+def test_self_update_skipped_in_background(self_update_env):
+    _, latest_version, *_ = _invoke_run(["--force", "--background"])
+
+    latest_version.assert_not_called()
+
+
+def test_self_update_skipped_when_not_interactive(self_update_env):
+    _, latest_version, *_ = _invoke_run(["--force", "--no-colors"], interactive=False)
+
+    latest_version.assert_not_called()
+
+
+def test_self_update_skipped_after_relaunch(self_update_env):
+    os.environ[self_update_module.SKIP_ENV] = "1"
+    _, latest_version, *_ = _invoke_run(["--force", "--no-colors"])
+
+    latest_version.assert_not_called()
+
+
+def test_self_update_install_failure_continues_run(self_update_env):
+    result, _, install, execvp, all_updaters, _ = _invoke_run(
+        ["--force", "--no-colors"], install_rc=1, user_input="y\n"
+    )
+
+    assert result.exit_code == 0
+    install.assert_called_once()
+    execvp.assert_not_called()
+    all_updaters.assert_called_once()
+    assert "Self-update failed" in result.output

@@ -49,6 +49,7 @@ chore: bump version to 2.0.8
 ### Execution flow
 
 1. **Idempotency check** (`idempotency.py`) — skip if a run happened within the last 24 hours
+   - **Self-update prompt** (`self_update.py`) — interactive runs only: if PyPI has a newer release (and it wasn't declined), ask `[Y/n]`; on yes, `uv tool install update-all@latest --force` then `os.execvp` with the same args
 2. **`SudoKeepalive`** (`sudo.py`) — refreshes `sudo -v` every 60s in a daemon thread (only when `--os` flag is set)
 3. **Updater catalog** (`updaters.py`) — `all_updaters()` returns 16 `Updater` dataclasses; CLI filters by `--only`/`--skip`
 4. **Sequential runners** (`runner.py`) — `run_sequential()` streams output live; used for Homebrew, APT, and OS updates
@@ -78,4 +79,5 @@ chore: bump version to 2.0.8
 | `agent.py` | Background scheduler install/uninstall |
 | `idempotency.py` | 24-hour sentinel at `~/.cache/update-all/last-run` |
 | `notify.py` | Native OS notifications |
+| `self_update.py` | PyPI latest-version lookup, version comparison, declined-version marker at `~/.cache/update-all/declined-version` |
 | `sudo.py` | `SudoKeepalive` daemon thread |
