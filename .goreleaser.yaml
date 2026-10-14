@@ -1,0 +1,24 @@
+version: 2
+
+project_name: update-all
+
+builds:
+  - id: update-all
+    main: ./cmd/update-all
+    binary: update-all
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    env: [CGO_ENABLED=0]
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
+
+release:
+  draft: false
+  prerelease: auto

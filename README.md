@@ -1,38 +1,32 @@
 # update-all
 
-`update-all` is a small macOS and Linux CLI that updates the package managers and developer tools installed on your machine.
-
-It skips tools that are not installed, runs independent updates in parallel, and keeps system updates in a sequential pass.
+`update-all` is a macOS and Linux CLI that updates the package managers and developer tools installed on your machine. It skips tools that are not installed, runs independent updates in parallel, and keeps system updates in a sequential pass. Some updaters require sudo depending on the packages being updated.
 
 ## Install
 
-Production install with `uv`:
+Install the latest GitHub Release binary:
 
 ```bash
-uv tool install update-all@latest
+curl -fsSL https://raw.githubusercontent.com/cruffinoni/update-all/main/install.sh | bash
 ```
 
-Editable development install:
+The installer supports macOS and Linux on amd64 and arm64. Binaries and SHA-256 checksums are published on [GitHub Releases](https://github.com/cruffinoni/update-all/releases).
+
+Build from a checkout:
 
 ```bash
-pip install -e ".[dev]"
+go build -o update-all ./cmd/update-all
 ```
 
 ## Update
 
-Upgrade an existing `uv` installation:
-
-```bash
-uv tool upgrade update-all
-```
-
-You can also update the package using its built-in command (requires `uv`):
+Run the built-in updater to fetch and verify the matching GitHub Release binary:
 
 ```bash
 update-all update
 ```
 
-When you run `update-all` interactively and a newer release is on PyPI, it asks `Update now? [Y/n]` before running updaters, like Oh My Zsh does. Answering yes installs the new version with `uv` and restarts the same command with the same arguments. Answering no skips that version: you will not be asked again until a newer one is published. To be asked again for the skipped version, delete `~/.cache/update-all/declined-version`. The check is skipped in `--background` mode, when `uv` is not installed, and when the terminal is not interactive.
+In an interactive run, `update-all` asks before installing a newer release. Declining a version suppresses that prompt until a newer release is available. Use `update-all update` to update immediately.
 
 ## Usage
 
@@ -42,25 +36,20 @@ update-all --os
 update-all --only BREW,NPM
 update-all --skip CLAUDE
 update-all --jobs 4
-update-all --force
 update-all update
-update-all logs
 ```
-
-Useful options:
 
 | Option | Description |
 | --- | --- |
-| `--os` | Include macOS or Linux system updates. |
+| `--os` | Include macOS or Linux system updates; sudo may be required depending on the packages updated. |
 | `--only LABELS` | Run only the comma-separated updater labels. |
 | `--skip LABELS` | Skip the comma-separated updater labels. |
 | `--jobs N` | Set the maximum number of parallel workers. |
-| `--force` | Ignore the once-per-day idempotency check. |
-| `--background` | Run without interactive output, skip OS updates, and log to a file. |
-| `--install-agent` | Install a LaunchAgent on macOS or a systemd timer on Linux. |
-| `--uninstall-agent` | Remove the background scheduler. |
-| `update` | Update `update-all` itself from PyPI using `uv`. |
-| `logs` | Display the latest background-run log. |
+| `--uninstall-agent` | Remove a scheduler installed by an earlier version. |
+| `--version`, `-v` | Show the CLI version. |
+| `update` | Update `update-all` from GitHub Releases. |
+
+Use `update-all --help` for help and `update-all completion` to generate shell completion scripts. Options can also be set with environment variables using the `UPDATE_ALL_` prefix, for example `UPDATE_ALL_JOBS=4`. Explicit command-line flags take precedence. There is no config file.
 
 ## Updates performed
 
@@ -81,11 +70,18 @@ Each updater runs only when its tool is available.
 | `CARGO` | Cargo-installed binaries | `cargo install-update -a` |
 | `ASDF` | asdf plugins | `asdf update && asdf plugin-update --all` |
 | `MISE` | mise toolchain | `mise self-update -y && mise upgrade -y` |
+| `TAILSCALE` | Tailscale | `sudo tailscale update` |
 | `HERMES` | Hermes Agent CLI | `hermes update` |
 | `CLAUDE` | Claude CLI | `claude update` |
 | `OMZ` | Oh My Zsh | Run Oh My Zsh's upgrade script, falling back to `git pull --rebase --autostash` |
 
-With `--os`, the additional system commands are:
+With `--os`, macOS runs `sudo softwareupdate -l` and `sudo softwareupdate -ia --verbose`. Linux runs `sudo apt full-upgrade -y` and `sudo apt autoremove -y`.
 
-- macOS: `sudo softwareupdate -l` and `sudo softwareupdate -ia --verbose`
-- Linux: `sudo apt full-upgrade -y` and `sudo apt autoremove -y`
+## Development
+
+The CLI uses Cobra and Viper. The application is under `cmd/update-all` and responsibility-specific packages are under `internal/`.
+
+```bash
+go test ./...
+go build ./cmd/update-all
+```

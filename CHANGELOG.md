@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.0.0] - 2026-10-14
+
+### Added
+- Go CLI with Cobra commands and Viper environment configuration.
+- GitHub Releases for macOS and Linux binaries with SHA-256 verification.
+- GoReleaser workflow for amd64 and arm64 builds.
+
+### Changed
+- Use Go as the implementation and GitHub Releases for installation and self-updates.
+
 ## [2.0.10] - 2026-10-01
 
 ### Added

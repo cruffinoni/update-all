@@ -1,69 +1,51 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BOLD='\033[1m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-RESET='\033[0m'
-
-info() { printf "${BOLD}%s${RESET}\n" "$*"; }
-ok()   { printf "${GREEN}✓${RESET} %s\n" "$*"; }
-warn() { printf "${YELLOW}⚠${RESET} %s\n" "$*"; }
-die()  { printf "${RED}✗${RESET} %s\n" "$*" >&2; exit 1; }
+info() { printf '%s\n' "$*"; }
+die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 
 case "$(uname -s)" in
-  Darwin) PLATFORM="macOS" ;;
-  Linux)  PLATFORM="Linux" ;;
-  *)      die "Unsupported platform: $(uname -s)" ;;
+  Darwin) GOOS=darwin ;;
+  Linux) GOOS=linux ;;
+  *) die "Unsupported operating system: $(uname -s)" ;;
+esac
+case "$(uname -m)" in
+  x86_64|amd64) GOARCH=amd64 ;;
+  aarch64|arm64) GOARCH=arm64 ;;
+  *) die "Unsupported architecture: $(uname -m)" ;;
 esac
 
-info "Installing update-all on ${PLATFORM}..."
-
-# --- Ensure uv is available ---
-if ! command -v uv >/dev/null 2>&1; then
-  info "uv not found — bootstrapping..."
-  curl -LsSf https://astral.sh/uv/install.sh | sh
-  export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
-  command -v uv >/dev/null 2>&1 || die "uv install failed. Install manually: https://docs.astral.sh/uv/getting-started/installation/"
-  ok "uv installed: $(uv --version)"
-else
-  ok "uv found: $(uv --version)"
+command -v curl >/dev/null 2>&1 || die "curl is required"
+command -v tar >/dev/null 2>&1 || die "tar is required"
+if command -v sha256sum >/dev/null 2>&1; then HASH_TOOL=sha256sum
+elif command -v shasum >/dev/null 2>&1; then HASH_TOOL=shasum
+else die "sha256sum or shasum is required"
 fi
 
-# --- Install update-all ---
-uv tool install "update-all@latest" --force --python 3.11
-ok "update-all installed"
+RELEASE_JSON="$(curl -fsSL https://api.github.com/repos/cruffinoni/update-all/releases/latest)" || die "Could not fetch the latest GitHub release"
+VERSION="$(printf '%s' "$RELEASE_JSON" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\([^"]*\)".*/\1/p' | head -n 1)"
+[ -n "$VERSION" ] || die "Could not read latest release version"
+ARCHIVE="update-all_${VERSION}_${GOOS}_${GOARCH}.tar.gz"
+BASE_URL="https://github.com/cruffinoni/update-all/releases/download/v${VERSION}"
+CHECKSUMS="update-all_${VERSION}_checksums.txt"
 
-# Ensure the uv tool bin dir is on PATH
-UV_BIN_DIR="$(uv tool bin 2>/dev/null || echo "$HOME/.local/bin")"
-export PATH="$UV_BIN_DIR:$PATH"
-
-if ! command -v update-all >/dev/null 2>&1; then
-  warn "'update-all' not found in PATH. Add this to your shell profile:"
-  printf "  export PATH=\"%s:\$PATH\"\n\n" "$UV_BIN_DIR"
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+curl -fsSL "$BASE_URL/$ARCHIVE" -o "$TMP_DIR/$ARCHIVE" || die "Could not download $ARCHIVE"
+curl -fsSL "$BASE_URL/$CHECKSUMS" -o "$TMP_DIR/$CHECKSUMS" || die "Could not download release checksums"
+cd "$TMP_DIR"
+EXPECTED="$(awk -v file="$ARCHIVE" '$2 == file {print $1}' "$CHECKSUMS")"
+[ -n "$EXPECTED" ] || die "No checksum found for $ARCHIVE"
+if [ "$HASH_TOOL" = sha256sum ]; then ACTUAL="$(sha256sum "$ARCHIVE" | awk '{print $1}')"
+else ACTUAL="$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')"
 fi
+[ "$EXPECTED" = "$ACTUAL" ] || die "Release archive checksum mismatch"
+tar -xzf "$ARCHIVE" update-all || die "Could not extract update-all"
 
-# --- Optionally install the scheduler ---
-INSTALL_AGENT=n
-if [ -e /dev/tty ]; then
-  printf "\nInstall background scheduler (runs update-all every hour via "
-  [ "$PLATFORM" = "macOS" ] && printf "LaunchAgent" || printf "systemd timer"
-  printf ")? [y/N] "
-  read -r INSTALL_AGENT </dev/tty || INSTALL_AGENT=n
-fi
+INSTALL_DIR="${UPDATE_ALL_INSTALL_DIR:-$HOME/.local/bin}"
+mkdir -p "$INSTALL_DIR"
+install -m 0755 update-all "$INSTALL_DIR/update-all"
+export PATH="$INSTALL_DIR:$PATH"
+info "Installed update-all $VERSION to $INSTALL_DIR/update-all"
 
-case "$INSTALL_AGENT" in
-  [yY]|[yY][eE][sS])
-    if update-all --install-agent; then
-      ok "Scheduler installed"
-    else
-      warn "Scheduler installation reported an error (see above)."
-    fi
-    ;;
-  *)
-    info "Run 'update-all --install-agent' anytime to enable the scheduler."
-    ;;
-esac
-
-printf "\nRun ${GREEN}update-all${RESET} to update all your package managers.\n"
+info "Run 'update-all' to update your package managers."

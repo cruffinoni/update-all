@@ -1,6 +1,2 @@
-__pycache__/
-*.egg-info/
-dist/
-build/
-venv/
-.env
+.idea
+vendor/
